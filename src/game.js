@@ -1,0 +1,2298 @@
+/* =========================================================
+   3D 贪吃蛇 · 小小探险
+   three.js r158 / 单文件 / 无外部资源
+   ========================================================= */
+(function () {
+  'use strict';
+
+  /* ---------------- 基础工具 ---------------- */
+  var TAU = Math.PI * 2, DEG = Math.PI / 180;
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function ri(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+
+  /* ---------------- 配置 ---------------- */
+  var MS = 13;                      // 网格边长（所有地图共用同一包围盒 13×13）
+  var CELL = 1;
+  var MC = (MS - 1) / 2;            // 6：中心格
+  var WALL = MS * 0.5;              // 6.5：包围盒边缘
+
+  var DIFFS = {
+    easy:   { step: 0.300, min: 0.190 },
+    normal: { step: 0.235, min: 0.140 },
+    hard:   { step: 0.180, min: 0.108 }
+  };
+  var ACCEL_STEP = 0.0055;
+  var MAX_SEG = MS * MS;
+
+  /* =========================================================
+     地图系统：13×13 包围盒内的任意形状
+     cells[z*MS+x] === 1 表示可通行
+     ========================================================= */
+  function makeCells(fn) {
+    var a = new Uint8Array(MS * MS);
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        a[z * MS + x] = fn(x, z) ? 1 : 0;
+      }
+    }
+    return a;
+  }
+
+  function cellFree(cells, x, z) {
+    if (x < 0 || x >= MS || z < 0 || z >= MS) return false;
+    return cells[z * MS + x] === 1;
+  }
+
+  /* 离中心最近的可通行格 */
+  function centerFree(cells) {
+    var best = null, bestD = 1e9;
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        var d = Math.abs(x - MC) + Math.abs(z - MC);
+        if (d < bestD) { bestD = d; best = { x: x, z: z }; }
+      }
+    }
+    return best;
+  }
+
+  /* 从起点 BFS，剔除不可达的孤岛，保证食物不会生成在进不去的区域 */
+  function pruneIslands(cells, sx, sz) {
+    if (!cellFree(cells, sx, sz)) return cells;
+    var seen = new Uint8Array(MS * MS);
+    var stack = [sz * MS + sx];
+    seen[sz * MS + sx] = 1;
+    var NB = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    while (stack.length) {
+      var k = stack.pop();
+      var x = k % MS, z = (k - x) / MS;
+      for (var i = 0; i < 4; i++) {
+        var nx = x + NB[i][0], nz = z + NB[i][1];
+        if (!cellFree(cells, nx, nz)) continue;
+        var nk = nz * MS + nx;
+        if (seen[nk]) continue;
+        seen[nk] = 1;
+        stack.push(nk);
+      }
+    }
+    for (var j = 0; j < cells.length; j++) if (!seen[j]) cells[j] = 0;
+    return cells;
+  }
+
+  /* 在形状内找一段 3 格直线作为出生位，返回蛇身（头在前）与朝向 */
+  var DIR4 = [{ x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }];
+
+  function findSpawn(cells) {
+    var best = null, bestD = 1e9;
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        var d = Math.abs(x - MC) + Math.abs(z - MC);
+        if (d < bestD) { bestD = d; best = { x: x, z: z }; }
+      }
+    }
+    if (!best) return null;
+    /* 以最近中心点为基准，找一个能容下 3 格直线的方向 */
+    for (var i = 0; i < 4; i++) {
+      var d0 = DIR4[i];
+      /* 头放在 t=+2，身为 t=+1、t=0，这样头前方还有余量 */
+      var ok = true;
+      for (var t = -2; t <= 4; t++) {
+        if (!cellFree(cells, best.x + d0.x * t, best.z + d0.z * t)) { ok = false; break; }
+      }
+      if (ok) {
+        return {
+          cells: [
+            { x: best.x + d0.x * 2, z: best.z + d0.z * 2 },
+            { x: best.x + d0.x, z: best.z + d0.z },
+            { x: best.x, z: best.z }
+          ],
+          dir: { x: d0.x, z: d0.z }
+        };
+      }
+    }
+    /* 退路：只要 3 格直线 */
+    for (var j = 0; j < 4; j++) {
+      var dj = DIR4[j];
+      var ok2 = true;
+      for (var s = 0; s <= 2; s++) {
+        if (!cellFree(cells, best.x + dj.x * s, best.z + dj.z * s)) { ok2 = false; break; }
+      }
+      if (ok2) {
+        return {
+          cells: [
+            { x: best.x + dj.x * 2, z: best.z + dj.z * 2 },
+            { x: best.x + dj.x, z: best.z + dj.z },
+            { x: best.x, z: best.z }
+          ],
+          dir: { x: dj.x, z: dj.z }
+        };
+      }
+    }
+    return {
+      cells: [{ x: best.x, z: best.z }],
+      dir: { x: 1, z: 0 }
+    };
+  }
+
+  /* ---------- 五张地图 ---------- */
+  var MAZE_WALLS = [
+    [2, 2], [3, 2], [2, 3], [3, 3],
+    [9, 2], [10, 2], [9, 3], [10, 3],
+    [2, 9], [3, 9], [2, 10], [3, 10],
+    [9, 9], [10, 9], [9, 10], [10, 10],
+    [6, 3], [6, 4], [6, 8], [6, 9],
+    [3, 6], [4, 6]
+  ];
+
+  var MAPS = [
+    {
+      id: 'classic',
+      name: '经典方形',
+      note: '无障碍 · 无怪兽',
+      cells: makeCells(function () { return true; }),
+      monsters: 0, monSpd: 0, speedK: 1.00, accelEvery: 4,
+      monColors: []
+    },
+    {
+      id: 'plus',
+      name: '十字广场',
+      note: '双向长廊 · 2 只怪兽',
+      cells: makeCells(function (x, z) {
+        return (z >= MC - 2 && z <= MC + 2) || (x >= MC - 2 && x <= MC + 2);
+      }),
+      monsters: 2, monSpd: 2.5, speedK: 1.06, accelEvery: 3,
+      monColors: [0xa06be0, 0x4ec7d8]
+    },
+    {
+      id: 'diamond',
+      name: '菱形花园',
+      note: '四角消失 · 3 只怪兽',
+      cells: makeCells(function (x, z) {
+        return Math.abs(x - MC) + Math.abs(z - MC) <= 6;
+      }),
+      monsters: 3, monSpd: 2.4, speedK: 1.10, accelEvery: 3,
+      monColors: [0xa06be0, 0xe2745a, 0x4ec7d8]
+    },
+    {
+      id: 'ring',
+      name: '环形赛道',
+      note: '中间留空 · 2 只怪兽',
+      cells: makeCells(function (x, z) {
+        var dx = Math.abs(x - MC), dz = Math.abs(z - MC);
+        return !(dx <= 2 && dz <= 2);
+      }),
+      monsters: 2, monSpd: 2.3, speedK: 1.08, accelEvery: 3,
+      monColors: [0xe2745a, 0xa06be0]
+    },
+    {
+      id: 'maze',
+      name: '糖果迷宫',
+      note: '障碍遍布 · 3 只怪兽',
+      cells: makeCells(function (x, z) {
+        for (var i = 0; i < MAZE_WALLS.length; i++) {
+          if (MAZE_WALLS[i][0] === x && MAZE_WALLS[i][1] === z) return false;
+        }
+        return true;
+      }),
+      monsters: 3, monSpd: 2.2, speedK: 1.12, accelEvery: 3,
+      monColors: [0xa06be0, 0x4ec7d8, 0xe2745a]
+    }
+  ];
+
+  /* 把形状里「走不到的孤岛」剪掉，避免食物生成在进不去的角落 */
+  function prepareMap(m) {
+    if (m.ready) return m.ready;
+    var c = new Uint8Array(m.cells);
+    var cf = centerFree(c);
+    if (cf) pruneIslands(c, cf.x, cf.z);
+    m.ready = c;
+    var n = 0;
+    for (var i = 0; i < c.length; i++) if (c[i]) n++;
+    m.freeCount = n;
+    return c;
+  }
+
+  function applyMap(id) {
+    var m = null;
+    for (var i = 0; i < MAPS.length; i++) if (MAPS[i].id === id) m = MAPS[i];
+    if (!m) m = MAPS[0];
+    prepareMap(m);
+    G.map = m;
+    G.mapId = m.id;
+    G.cells = new Uint8Array(m.ready);
+    return m;
+  }
+
+  /* ---------------- 运行状态 ---------------- */
+  var G = {
+    state: 'menu',        // menu | playing | paused | over
+    diff: 'normal',
+    mapId: 'classic',
+    map: MAPS[0],
+    cells: null,          // 当前地图的可通行表（激活时复制一份）
+    score: 0,
+    best: 0,
+    eaten: 0,
+    stepDur: DIFFS.normal.step,
+    minDur: DIFFS.normal.min,
+    stepT: 0,
+    tMix: 1,
+    monT: 0,
+    monDur: 1,
+    monFreeze: false,
+    time: 0,
+    shake: 0,
+    dead: 'wall',
+    soundOn: true
+  };
+
+  var snake = { cells: [], prev: [], dir: { x: 1, z: 0 }, queue: [] };
+  var food = { gx: 0, gz: 0, group: null, type: 'apple' };
+  var monsters = [];
+
+  var errors = [];
+  window.addEventListener('error', function (e) {
+    errors.push(String(e.message || e.error));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    errors.push('promise: ' + String(e.reason));
+  });
+
+  /* ---------------- 坐标换算 ---------------- */
+  function gx2w(g) { return (g - MC) * CELL; }
+  function cellKey(x, z) { return x + ',' + z; }
+
+  /* =========================================================
+     音效（WebAudio 实时合成，无音频文件）
+     ========================================================= */
+  var Snd = {
+    ctx: null, master: null, musicBus: null, timer: null, step: 0, ok: false,
+
+    init: function () {
+      if (this.ctx) return;
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      try { this.ctx = new AC(); } catch (e) { return; }
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.62;
+      this.master.connect(this.ctx.destination);
+      this.musicBus = this.ctx.createGain();
+      this.musicBus.gain.value = 0;
+      this.musicBus.connect(this.master);
+      this.ok = true;
+    },
+
+    resume: function () {
+      if (!this.ctx) return;
+      if (this.ctx.state === 'suspended') { this.ctx.resume(); }
+    },
+
+    tone: function (freq, dur, type, vol, slideTo, dest) {
+      if (!this.ok || !G.soundOn) return;
+      var t0 = this.ctx.currentTime;
+      var o = this.ctx.createOscillator();
+      var g = this.ctx.createGain();
+      o.type = type || 'sine';
+      o.frequency.setValueAtTime(freq, t0);
+      if (slideTo) {
+        o.frequency.exponentialRampToValueAtTime(Math.max(24, slideTo), t0 + dur);
+      }
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol || 0.2), t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g);
+      g.connect(dest || this.master);
+      o.start(t0);
+      o.stop(t0 + dur + 0.03);
+    },
+
+    eat: function () {
+      this.tone(784, 0.09, 'triangle', 0.30);
+      var self = this;
+      setTimeout(function () { self.tone(1174.7, 0.13, 'triangle', 0.26); }, 62);
+      setTimeout(function () { self.tone(1568, 0.10, 'sine', 0.16); }, 128);
+    },
+    turn: function () {
+      this.tone(520, 0.05, 'sine', 0.07);
+    },
+    over: function () {
+      this.tone(392, 0.20, 'sawtooth', 0.20, 300);
+      var self = this;
+      setTimeout(function () { self.tone(311, 0.22, 'sawtooth', 0.18, 240); }, 150);
+      setTimeout(function () { self.tone(233, 0.34, 'sawtooth', 0.16, 110); }, 320);
+    },
+    start: function () {
+      this.tone(523.25, 0.10, 'triangle', 0.22);
+      var self = this;
+      setTimeout(function () { self.tone(659.25, 0.10, 'triangle', 0.22); }, 90);
+      setTimeout(function () { self.tone(783.99, 0.16, 'triangle', 0.22); }, 180);
+    },
+
+    /* 轻快的五声音阶循环 */
+    startMusic: function () {
+      if (!this.ok || this.timer) return;
+      var self = this;
+      var NOTES = [
+        523.25, 659.25, 783.99, 659.25, 587.33, 698.46, 880.00, 698.46,
+        523.25, 659.25, 783.99, 1046.50, 880.00, 783.99, 698.46, 587.33
+      ];
+      if (this.musicBus) this.musicBus.gain.setTargetAtTime(1, this.ctx.currentTime, 0.4);
+      var tick = function () {
+        if (!self.ok) return;
+        if (G.state === 'playing') {
+          var n = NOTES[self.step % NOTES.length];
+          self.tone(n, 0.20, 'triangle', 0.052, null, self.musicBus);
+          if (self.step % 8 === 0) self.tone(n / 2, 0.34, 'sine', 0.075, null, self.musicBus);
+        }
+        self.step++;
+        self.timer = setTimeout(tick, 300);
+      };
+      this.timer = setTimeout(tick, 340);
+    },
+
+    stopMusic: function () {
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      if (this.ok && this.musicBus) {
+        this.musicBus.gain.setTargetAtTime(0, this.ctx.currentTime, 0.25);
+      }
+    }
+  };
+
+  /* =========================================================
+     三维基础
+     ========================================================= */
+  var canvas = document.getElementById('c');
+  var scene, camera, renderer, clock;
+  var sunLight;
+  var baseCam = new THREE.Vector3(0, 26, 20);
+  var camPos = new THREE.Vector3(0, 26, 20);
+  var camLook = new THREE.Vector3(0, 0, 0);
+  var lookTarget = new THREE.Vector3();
+  var v3a = new THREE.Vector3();
+  var v3b = new THREE.Vector3();
+
+  /* ---------------- 材质库 ---------------- */
+  var MAT = {};
+
+  function initMaterials() {
+    MAT.ground = new THREE.MeshLambertMaterial({ color: 0x6fb84b });
+    MAT.outer  = new THREE.MeshLambertMaterial({ color: 0x63ab42 });
+    MAT.post   = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    MAT.rail   = new THREE.MeshLambertMaterial({ color: 0xff9fc0 });
+    MAT.kerb   = new THREE.MeshLambertMaterial({ color: 0x4e9438 });
+    MAT.trunk  = new THREE.MeshLambertMaterial({ color: 0x8b5a34 });
+    MAT.crown  = new THREE.MeshLambertMaterial({ color: 0x3f9e46 });
+    MAT.cloud  = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x9fbfd8, emissiveIntensity: 0.18 });
+    MAT.hill   = new THREE.MeshLambertMaterial({ color: 0x5fa93f });
+
+    MAT.snakeHead = new THREE.MeshLambertMaterial({ color: 0x46dd7c });
+    MAT.eyeWhite  = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    MAT.eyePupil  = new THREE.MeshLambertMaterial({ color: 0x20303f });
+    MAT.blush     = new THREE.MeshLambertMaterial({ color: 0xff9db4, transparent: true, opacity: 0.9 });
+    MAT.tongue    = new THREE.MeshLambertMaterial({ color: 0xf0485f });
+
+    MAT.apple  = new THREE.MeshPhongMaterial({ color: 0xe8453f, shininess: 55, specular: 0x552222 });
+    MAT.stem   = new THREE.MeshLambertMaterial({ color: 0x80552f });
+    MAT.leaf   = new THREE.MeshPhongMaterial({ color: 0x4fbd52, shininess: 35 });
+    MAT.star   = new THREE.MeshPhongMaterial({ color: 0xffcf3d, shininess: 90, specular: 0xfff2c0, emissive: 0x6a4a00, emissiveIntensity: 0.35 });
+    MAT.donut  = new THREE.MeshPhongMaterial({ color: 0xff9dc4, shininess: 40 });
+    MAT.icing  = new THREE.MeshPhongMaterial({ color: 0xffe1ee, shininess: 70 });
+    MAT.cherry = new THREE.MeshPhongMaterial({ color: 0xe0304f, shininess: 80, specular: 0x661122 });
+
+    MAT.glow = new THREE.MeshBasicMaterial({
+      color: 0xfff8c8, transparent: true, opacity: 0.10,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending
+    });
+    MAT.ring = new THREE.MeshBasicMaterial({
+      color: 0xffd23f, transparent: true, opacity: 0.85,
+      side: THREE.DoubleSide, depthWrite: false
+    });
+    MAT.disc = new THREE.MeshBasicMaterial({
+      color: 0xfff3a8, transparent: true, opacity: 0.30,
+      side: THREE.DoubleSide, depthWrite: false
+    });
+    /* 怪兽的危险范围：用普通混合而不是加色，否则在亮绿台面上会发白看不出红色 */
+    MAT.dangerRing = new THREE.MeshBasicMaterial({
+      color: 0xf2402f, transparent: true, opacity: 0.80,
+      side: THREE.DoubleSide, depthWrite: false
+    });
+    MAT.dangerDisc = new THREE.MeshBasicMaterial({
+      color: 0xff5c3d, transparent: true, opacity: 0.22,
+      side: THREE.DoubleSide, depthWrite: false
+    });
+  }
+
+  /* ---------------- 天空 ---------------- */
+  function buildSky() {
+    var geo = new THREE.SphereGeometry(190, 32, 20);
+    var pos = geo.attributes.position;
+    var arr = new Float32Array(pos.count * 3);
+    var top = new THREE.Color(0x3f9fe4);
+    var mid = new THREE.Color(0xa4dcf6);
+    var bot = new THREE.Color(0xe6f7ff);
+    var c = new THREE.Color();
+    for (var i = 0; i < pos.count; i++) {
+      var y = pos.getY(i) / 190;
+      if (y > 0) { c.copy(mid).lerp(top, Math.pow(clamp(y, 0, 1), 0.8)); }
+      else { c.copy(mid).lerp(bot, Math.pow(clamp(-y, 0, 1), 0.85)); }
+      arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+    var sky = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false
+    }));
+    sky.renderOrder = -10;
+    sky.name = 'sky';
+    scene.add(sky);
+  }
+
+  /* ---------------- 棋盘纹理（按地图形状遮罩，形状外透明） ---------------- */
+  function makeBoardTexture(cells) {
+    var n = MS;
+    var S = n * 64;                 /* 64 的整数倍，格子边缘不出缝 */
+    var cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    var g = cv.getContext('2d');
+    var s = S / n;
+    var x, z;
+
+    /* 1. 棋盘格：只画可通行格 */
+    for (z = 0; z < n; z++) {
+      for (x = 0; x < n; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        g.fillStyle = ((x + z) & 1) ? '#a5e870' : '#8ad456';
+        g.fillRect(x * s, z * s, s, s);
+      }
+    }
+
+    /* 以下全部裁剪在形状内部，避免溢出到透明区域 */
+    g.save();
+    g.beginPath();
+    for (z = 0; z < n; z++) {
+      for (x = 0; x < n; x++) {
+        if (cellFree(cells, x, z)) g.rect(x * s, z * s, s, s);
+      }
+    }
+    g.clip();
+
+    /* 2. 草叶噪点 */
+    for (var k = 0; k < 2600; k++) {
+      var px = Math.random() * S, py = Math.random() * S;
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.10)' : 'rgba(40,110,30,0.08)';
+      g.fillRect(px, py, 2, 5);
+    }
+
+    /* 3. 细网格 */
+    g.strokeStyle = 'rgba(255,255,255,0.15)';
+    g.lineWidth = 2;
+    for (z = 0; z < n; z++) {
+      for (x = 0; x < n; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        g.strokeRect(x * s + 1, z * s + 1, s - 2, s - 2);
+      }
+    }
+
+    /* 4. 边界内侧压暗一圈，让孩子看清「这边过不去」 */
+    g.strokeStyle = 'rgba(44,104,36,0.40)';
+    g.lineWidth = s * 0.16;
+    g.beginPath();
+    for (z = 0; z < n; z++) {
+      for (x = 0; x < n; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        if (!cellFree(cells, x + 1, z)) { g.moveTo((x + 1) * s, z * s); g.lineTo((x + 1) * s, (z + 1) * s); }
+        if (!cellFree(cells, x - 1, z)) { g.moveTo(x * s, z * s); g.lineTo(x * s, (z + 1) * s); }
+        if (!cellFree(cells, x, z + 1)) { g.moveTo(x * s, (z + 1) * s); g.lineTo((x + 1) * s, (z + 1) * s); }
+        if (!cellFree(cells, x, z - 1)) { g.moveTo(x * s, z * s); g.lineTo((x + 1) * s, z * s); }
+      }
+    }
+    g.stroke();
+    g.restore();
+
+    var tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    return tex;
+  }
+
+  /* ---------------- 世界搭建 ---------------- */
+  var decor = { clouds: null, butterflies: [], trees: [] };
+
+  function makeGrassTexture() {
+    var S = 256;
+    var cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    var g = cv.getContext('2d');
+    g.fillStyle = '#6cba49';
+    g.fillRect(0, 0, S, S);
+    /* 大色斑，避免整片死板 */
+    for (var k = 0; k < 30; k++) {
+      var cx = Math.random() * S, cy = Math.random() * S, r = 12 + Math.random() * 34;
+      var grd = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+      grd.addColorStop(0, Math.random() < 0.5 ? 'rgba(220,255,170,0.13)' : 'rgba(46,120,44,0.10)');
+      grd.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grd;
+      g.beginPath(); g.arc(cx, cy, r, 0, TAU); g.fill();
+    }
+    /* 草叶 */
+    for (var i = 0; i < 3600; i++) {
+      var x = Math.random() * S, y = Math.random() * S;
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,220,0.10)' : 'rgba(38,100,36,0.12)';
+      g.fillRect(x, y, 1.6, 3.4);
+    }
+    var t = new THREE.CanvasTexture(cv);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(26, 26);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    return t;
+  }
+
+  /* 竞技场（随地图重建） */
+  var arenaGroup = null;
+
+  function disposeArena() {
+    if (!arenaGroup) return;
+    scene.remove(arenaGroup);
+    arenaGroup.traverse(function (o) {
+      if (!o.isMesh) return;
+      if (o.geometry) o.geometry.dispose();
+      /* 只销毁本场自建的材质（MAT.* 是全局共享的，不能碰） */
+      if (o.material && o.material.userData && o.material.userData.own) {
+        if (o.material.map) o.material.map.dispose();
+        o.material.dispose();
+      }
+    });
+    arenaGroup = null;
+  }
+
+  function buildArena() {
+    disposeArena();
+    arenaGroup = new THREE.Group();
+    arenaGroup.name = 'arena';
+    scene.add(arenaGroup);
+
+    var cells = G.cells;
+    var x, z, i;
+    var d = new THREE.Object3D();
+
+    /* ---------- 1. 台面：可通行格各自一块厚板，拼出形状 ---------- */
+    var slabGeo = new THREE.BoxGeometry(CELL * 1.004, 0.54, CELL * 1.004);
+    var nFree = 0;
+    for (z = 0; z < MS; z++) for (x = 0; x < MS; x++) if (cellFree(cells, x, z)) nFree++;
+
+    var slabs = new THREE.InstancedMesh(slabGeo, MAT.kerb, nFree);
+    slabs.receiveShadow = true;
+    slabs.castShadow = false;
+    slabs.frustumCulled = false;
+    var si = 0;
+    for (z = 0; z < MS; z++) {
+      for (x = 0; x < MS; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        d.position.set(gx2w(x), -0.275, gx2w(z));
+        d.rotation.set(0, 0, 0);
+        d.scale.set(1, 1, 1);
+        d.updateMatrix();
+        slabs.setMatrixAt(si++, d.matrix);
+      }
+    }
+    arenaGroup.add(slabs);
+
+    /* ---------- 2. 棋盘面：形状外 alpha 裁掉 ---------- */
+    var boardMat = new THREE.MeshLambertMaterial({
+      map: makeBoardTexture(cells), alphaTest: 0.5, transparent: false
+    });
+    boardMat.userData.own = true;
+    var board = new THREE.Mesh(new THREE.PlaneGeometry(MS * CELL, MS * CELL, 1, 1), boardMat);
+    board.rotation.x = -Math.PI / 2;
+    board.position.y = 0.002;
+    board.receiveShadow = true;
+    board.name = 'board';
+    arenaGroup.add(board);
+
+    /* ---------- 3. 找出真正的形状边界：可通行格 → 墙格 的交界 ---------- */
+    var edges = [];          /* 每条边界边：位置中点 + 外法线 */
+    for (z = 0; z < MS; z++) {
+      for (x = 0; x < MS; x++) {
+        if (!cellFree(cells, x, z)) continue;
+        for (i = 0; i < 4; i++) {
+          var nrm = DIR4[i];
+          if (cellFree(cells, x + nrm.x, z + nrm.z)) continue;
+          edges.push({
+            px: gx2w(x) + nrm.x * CELL * 0.5,
+            pz: gx2w(z) + nrm.z * CELL * 0.5,
+            nx: nrm.x, nz: nrm.z
+          });
+        }
+      }
+    }
+
+    /* ---------- 4. 围栏柱子 + 顶球（每条边界边中点一根） ---------- */
+    var nE = edges.length;
+    if (nE) {
+      var postGeo = new THREE.CylinderGeometry(0.075, 0.085, 0.85, 8);
+      var ballGeo = new THREE.SphereGeometry(0.105, 10, 8);
+      var railGeo = new THREE.BoxGeometry(CELL + 0.06, 0.062, 0.062);
+
+      var posts = new THREE.InstancedMesh(postGeo, MAT.post, nE);
+      var balls = new THREE.InstancedMesh(ballGeo, MAT.post, nE);
+      var rails = new THREE.InstancedMesh(railGeo, MAT.rail, nE);
+      posts.castShadow = false; balls.castShadow = false; rails.castShadow = false;
+      posts.frustumCulled = false; balls.frustumCulled = false; rails.frustumCulled = false;
+
+      var colW = new THREE.Color(0xffffff);
+      var colP = new THREE.Color(0xffa8c6);
+
+      for (i = 0; i < nE; i++) {
+        var e = edges[i];
+        d.position.set(e.px, 0.425, e.pz);
+        d.rotation.set(0, 0, 0);
+        d.scale.set(1, 1, 1);
+        d.updateMatrix();
+        posts.setMatrixAt(i, d.matrix);
+        posts.setColorAt(i, (i & 1) ? colW : colP);
+
+        d.position.set(e.px, 0.88, e.pz);
+        d.updateMatrix();
+        balls.setMatrixAt(i, d.matrix);
+        balls.setColorAt(i, (i & 1) ? colP : colW);
+
+        /* 横杆沿着边的方向铺：法线是 X 时沿 Z，法线是 Z 时沿 X */
+        d.position.set(e.px, 0.60, e.pz);
+        d.rotation.set(0, e.nx !== 0 ? Math.PI / 2 : 0, 0);
+        d.updateMatrix();
+        rails.setMatrixAt(i, d.matrix);
+      }
+      posts.instanceColor.needsUpdate = true;
+      balls.instanceColor.needsUpdate = true;
+
+      arenaGroup.add(posts); arenaGroup.add(balls); arenaGroup.add(rails);
+    }
+
+    return { edges: nE, free: nFree };
+  }
+
+  function buildWorld() {
+    /* 外圈草地 */
+    var outer = new THREE.Mesh(
+      new THREE.PlaneGeometry(300, 300),
+      new THREE.MeshLambertMaterial({ map: makeGrassTexture() })
+    );
+    outer.rotation.x = -Math.PI / 2;
+    outer.position.y = -0.06;
+    outer.receiveShadow = true;
+    scene.add(outer);
+
+    buildArena();
+
+    /* 树 */
+    buildTrees();
+    /* 小花 */
+    buildFlowers();
+    /* 云 */
+    buildClouds();
+    /* 山丘 */
+    buildHills();
+    /* 蝴蝶 */
+    for (var b = 0; b < 3; b++) { makeButterfly([0xffd166, 0xff8fb1, 0xa8e6ff][b]); }
+  }
+
+  /* 圆滚滚的果冻树 */
+  function buildTrees() {
+    var N = 14;
+    var trunkGeo = new THREE.CylinderGeometry(0.19, 0.27, 1.0, 8);
+    var crownGeo = new THREE.SphereGeometry(1, 16, 12);
+    var trunks = new THREE.InstancedMesh(trunkGeo, MAT.trunk, N);
+    var crowns = new THREE.InstancedMesh(crownGeo, MAT.crown, N * 2);
+    trunks.castShadow = true; crowns.castShadow = true;
+    crowns.receiveShadow = true;
+    var d = new THREE.Object3D();
+    var c = new THREE.Color();
+
+    for (var i = 0; i < N; i++) {
+      /* 环绕场地散布，避开相机脚下 */
+      var ang = (i / N) * TAU + rand(-0.30, 0.30);
+      var rad = rand(12.5, 22.5);
+      var x = Math.cos(ang) * rad, z = Math.sin(ang) * rad;
+      var cdx = x - baseCam.x, cdz = z - baseCam.z;
+      if (Math.sqrt(cdx * cdx + cdz * cdz) < 11.5) { rad += 13; x = Math.cos(ang) * rad; z = Math.sin(ang) * rad; }
+      var s = rand(0.85, 1.45);
+
+      /* 树干（矮而粗，被画面边缘裁到时不会只剩一根柱子） */
+      d.position.set(x, 0.5 * s, z);
+      d.rotation.set(0, rand(0, TAU), 0);
+      d.scale.set(s, s, s);
+      d.updateMatrix();
+      trunks.setMatrixAt(i, d.matrix);
+
+      /* 下层大球 */
+      d.position.set(x, 1.55 * s, z);
+      d.rotation.set(0, rand(0, TAU), 0);
+      d.scale.set(1.45 * s, 1.15 * s, 1.45 * s);
+      d.updateMatrix();
+      crowns.setMatrixAt(i * 2, d.matrix);
+      c.setHSL(rand(0.255, 0.315), rand(0.52, 0.68), rand(0.42, 0.52));
+      crowns.setColorAt(i * 2, c);
+
+      /* 上层小球 */
+      d.position.set(x + rand(-0.2, 0.2) * s, 2.25 * s, z + rand(-0.2, 0.2) * s);
+      d.scale.set(0.95 * s, 0.86 * s, 0.95 * s);
+      d.updateMatrix();
+      crowns.setMatrixAt(i * 2 + 1, d.matrix);
+      c.setHSL(rand(0.26, 0.32), rand(0.56, 0.72), rand(0.46, 0.56));
+      crowns.setColorAt(i * 2 + 1, c);
+    }
+    if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+    scene.add(trunks); scene.add(crowns);
+  }
+
+  /* 场外小花点缀 */
+  function buildFlowers() {
+    var N = 220;
+    var geo = new THREE.SphereGeometry(0.085, 6, 5);
+    var mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    var mesh = new THREE.InstancedMesh(geo, mat, N);
+    mesh.frustumCulled = false;
+    var d = new THREE.Object3D();
+    var c = new THREE.Color();
+    var palette = [0xfff4f8, 0xffe36b, 0xff9ec4, 0xffb46b, 0xffffff, 0xc9a7ff];
+    for (var i = 0; i < N; i++) {
+      var a = rand(0, TAU);
+      var r = rand(WALL + 0.6, 22);
+      d.position.set(Math.cos(a) * r, 0.06, Math.sin(a) * r);
+      d.rotation.set(0, 0, 0);
+      var s = rand(0.7, 1.5);
+      d.scale.set(s, s * 0.8, s);
+      d.updateMatrix();
+      mesh.setMatrixAt(i, d.matrix);
+      c.setHex(palette[i % palette.length]);
+      mesh.setColorAt(i, c);
+    }
+    mesh.instanceColor.needsUpdate = true;
+    scene.add(mesh);
+  }
+
+  function buildClouds() {
+    var N = 26;
+    var geo = new THREE.SphereGeometry(1, 10, 8);
+    var mesh = new THREE.InstancedMesh(geo, MAT.cloud, N);
+    mesh.name = 'clouds';
+    var d = new THREE.Object3D();
+    var i = 0;
+    for (var g = 0; g < 7; g++) {
+      var cx = rand(-52, 52), cy = rand(15, 27), cz = rand(-58, -16);
+      var nb = 3 + (g % 3);
+      for (var k = 0; k < nb && i < N; k++) {
+        var s = rand(2.0, 4.2);
+        d.position.set(cx + rand(-4.5, 4.5), cy + rand(-0.8, 1.2), cz + rand(-2.2, 2.2));
+        d.scale.set(s, s * 0.72, s * 0.86);
+        d.rotation.set(0, rand(0, TAU), 0);
+        d.updateMatrix();
+        mesh.setMatrixAt(i, d.matrix);
+        i++;
+      }
+    }
+    mesh.count = i;
+    mesh.castShadow = false;
+    scene.add(mesh);
+    decor.clouds = mesh;
+  }
+
+  function buildHills() {
+    var geo = new THREE.SphereGeometry(1, 18, 12);
+    for (var i = 0; i < 7; i++) {
+      var a = (i / 7) * TAU + 0.4;
+      var r = rand(58, 78);
+      var s = rand(10, 20);
+      var m = new THREE.Mesh(geo, MAT.hill);
+      m.position.set(Math.cos(a) * r, rand(-3, 1), Math.sin(a) * r);
+      m.scale.set(s * 1.7, s * 0.55, s);
+      scene.add(m);
+    }
+  }
+
+  function makeButterfly(color) {
+    var g = new THREE.Group();
+    /* 翅膀水平展开（俯视时才看得出是蝴蝶），绕前后轴上下扇动 */
+    var wingGeo = new THREE.SphereGeometry(0.30, 10, 8);
+    wingGeo.scale(0.66, 0.14, 1.15);
+    var wm = new THREE.MeshLambertMaterial({ color: color, side: THREE.DoubleSide });
+    var wl = new THREE.Mesh(wingGeo, wm);
+    var wr = new THREE.Mesh(wingGeo, wm);
+    wl.castShadow = false; wr.castShadow = false;
+    wl.position.x = -0.30; wr.position.x = 0.30;
+    var body = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.05, 0.2, 3, 6),
+      new THREE.MeshLambertMaterial({ color: 0x7c8b9c })
+    );
+    body.rotation.z = Math.PI / 2;
+    g.add(wl); g.add(wr); g.add(body);
+    g.userData = {
+      wl: wl, wr: wr,
+      r: rand(8.6, 12.5), a: rand(0, TAU), sp: rand(0.22, 0.44), y: rand(4.2, 6.4)
+    };
+    scene.add(g);
+    decor.butterflies.push(g);
+  }
+
+  /* =========================================================
+     蛇
+     ========================================================= */
+  var bodyMesh = null;
+  var headGroup = null;
+  var tongueGroup = null;
+  var dummy = new THREE.Object3D();
+  var tmpColor = new THREE.Color();
+  var segPos = [];
+  var headYaw = Math.PI / 2;
+  var headPulse = 0;
+  var lastColorLen = -1;
+
+  function buildSnake() {
+    var geo = new THREE.SphereGeometry(1, 16, 12);
+    var mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    bodyMesh = new THREE.InstancedMesh(geo, mat, MAX_SEG * 2);
+    bodyMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    bodyMesh.castShadow = true;
+    bodyMesh.receiveShadow = true;
+    bodyMesh.frustumCulled = false;
+    bodyMesh.count = 0;
+    bodyMesh.setColorAt(0, tmpColor.setHex(0xffffff));
+    scene.add(bodyMesh);
+
+    headGroup = new THREE.Group();
+    var skull = new THREE.Mesh(new THREE.SphereGeometry(0.62, 22, 16), MAT.snakeHead);
+    skull.castShadow = true;
+    skull.scale.set(1, 0.96, 1.06);
+    headGroup.add(skull);
+
+    /* 眼睛 */
+    var eyeGeo = new THREE.SphereGeometry(0.20, 14, 12);
+    var pupGeo = new THREE.SphereGeometry(0.118, 12, 10);
+    [-1, 1].forEach(function (s) {
+      var e = new THREE.Mesh(eyeGeo, MAT.eyeWhite);
+      e.position.set(0.275 * s, 0.20, 0.43);
+      e.scale.set(1, 1.06, 1);
+      headGroup.add(e);
+      var p = new THREE.Mesh(pupGeo, MAT.eyePupil);
+      p.position.set(0.295 * s, 0.21, 0.555);
+      p.scale.set(1, 1, 0.62);
+      headGroup.add(p);
+    });
+
+    /* 腮红 */
+    var blushGeo = new THREE.SphereGeometry(0.125, 10, 8);
+    [-1, 1].forEach(function (s) {
+      var b = new THREE.Mesh(blushGeo, MAT.blush);
+      b.position.set(0.445 * s, -0.05, 0.35);
+      b.scale.set(1, 0.62, 0.42);
+      headGroup.add(b);
+    });
+
+    /* 舌头 */
+    tongueGroup = new THREE.Group();
+    var tg1 = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.022, 0.17), MAT.tongue);
+    var tg2 = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.022, 0.12), MAT.tongue);
+    var tg3 = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.022, 0.12), MAT.tongue);
+    tg2.position.set(-0.055, 0, 0.14); tg2.rotation.y = 0.55;
+    tg3.position.set(0.055, 0, 0.14); tg3.rotation.y = -0.55;
+    tongueGroup.add(tg1); tongueGroup.add(tg2); tongueGroup.add(tg3);
+    tongueGroup.position.set(0, -0.18, 0.55);
+    headGroup.add(tongueGroup);
+
+    headGroup.position.set(0, 0.68, 0);
+    scene.add(headGroup);
+  }
+
+  function hueAt(i) {
+    /* 从头部的亮绿过渡到黄—橙—粉—紫—蓝，形成彩虹蛇 */
+    return ((0.145 - i * 0.048) % 1 + 1) % 1;
+  }
+  function radiusAt(i, n) {
+    var k = i / Math.max(1, n - 1);
+    var t = clamp((k - 0.55) / 0.45, 0, 1);
+    return lerp(0.51, 0.26, t * t);
+  }
+
+  /* 计算插值后的各节位置 */
+  function layoutSnake() {
+    var n = snake.cells.length;
+    var t = G.tMix;
+    segPos.length = 0;
+    for (var i = 0; i < n; i++) {
+      var to = snake.cells[i];
+      var from = snake.prev[i] || snake.prev[snake.prev.length - 1] || to;
+      var tx = gx2w(to.x), tz = gx2w(to.z);
+      var fx = gx2w(from.x), fz = gx2w(from.z);
+      segPos.push({ x: lerp(fx, tx, t), z: lerp(fz, tz, t) });
+    }
+  }
+
+  function refreshBodyColors(n) {
+    if (n === lastColorLen) return;
+    lastColorLen = n;
+    var idx = 0;
+    for (var i = 1; i < n; i++) {
+      tmpColor.setHSL(hueAt(i), 0.80, 0.54);
+      bodyMesh.setColorAt(idx, tmpColor);
+      idx++;
+    }
+    for (var j = 0; j < n - 1; j++) {
+      tmpColor.setHSL(hueAt(j + 0.5), 0.76, 0.60);
+      bodyMesh.setColorAt(idx, tmpColor);
+      idx++;
+    }
+    if (bodyMesh.instanceColor) bodyMesh.instanceColor.needsUpdate = true;
+  }
+
+  function renderSnake() {
+    var n = snake.cells.length;
+    var time = G.time;
+    var idx = 0;
+
+    refreshBodyColors(n);
+
+    for (var i = 1; i < n; i++) {
+      var p = segPos[i];
+      var r = radiusAt(i, n);
+      var y = 0.52 + Math.sin(time * 3.3 - i * 0.42) * 0.045;
+      dummy.position.set(p.x, y, p.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(r, r * 0.96, r);
+      dummy.updateMatrix();
+      bodyMesh.setMatrixAt(idx, dummy.matrix);
+      idx++;
+    }
+    for (var j = 0; j < n - 1; j++) {
+      var A = segPos[j], B = segPos[j + 1];
+      var ra = radiusAt(j, n), rb = radiusAt(j + 1, n);
+      var rr = Math.min(ra, rb) * 0.94;
+      var yy = 0.52 + Math.sin(time * 3.3 - (j + 0.5) * 0.42) * 0.045;
+      dummy.position.set((A.x + B.x) / 2, yy, (A.z + B.z) / 2);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(rr, rr * 0.96, rr);
+      dummy.updateMatrix();
+      bodyMesh.setMatrixAt(idx, dummy.matrix);
+      idx++;
+    }
+
+    bodyMesh.count = Math.min(idx, MAX_SEG * 2);
+    bodyMesh.instanceMatrix.needsUpdate = true;
+
+    /* 头 */
+    var h = segPos[0] || { x: 0, z: 0 };
+    var bob = Math.sin(time * 3.0) * 0.03;
+    headGroup.position.set(h.x, 0.68 + bob, h.z);
+
+    var targetYaw = Math.atan2(snake.dir.x, snake.dir.z);
+    var delta = ((targetYaw - headYaw + Math.PI * 3) % TAU) - Math.PI;
+    headYaw += delta * 0.28;
+    headGroup.rotation.y = headYaw;
+
+    if (headPulse > 0) headPulse = Math.max(0, headPulse - 0.045);
+    var sc = 1 + headPulse * 0.22;
+    headGroup.scale.set(sc, sc, sc);
+
+    /* 舌头 */
+    var cyc = time % 2.7;
+    var ext = cyc < 0.30 ? Math.sin((cyc / 0.30) * Math.PI) : 0;
+    tongueGroup.position.z = 0.47 + ext * 0.22;
+    tongueGroup.scale.set(1, 1, 0.35 + ext * 1.5);
+  }
+
+  /* =========================================================
+     食物
+     ========================================================= */
+  var foodGeoCache = {};
+
+  function buildFoodMesh(type) {
+    var g = new THREE.Group();
+
+    if (type === 'apple') {
+      var body = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 16), MAT.apple);
+      body.scale.set(1, 0.95, 1);
+      body.position.y = 0.4;
+      body.castShadow = true;
+      g.add(body);
+      var stem = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.048, 0.19, 7), MAT.stem);
+      stem.position.set(0, 0.79, 0);
+      stem.rotation.z = 0.2;
+      g.add(stem);
+      var leaf = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 9), MAT.leaf);
+      leaf.scale.set(1.45, 0.28, 0.85);
+      leaf.position.set(0.19, 0.8, 0);
+      leaf.rotation.z = -0.42;
+      g.add(leaf);
+
+    } else if (type === 'star') {
+      if (!foodGeoCache.star) {
+        var shape = new THREE.Shape();
+        var pts = 5, ro = 0.44, rIn = 0.185;
+        for (var i = 0; i < pts * 2; i++) {
+          var a = (i / (pts * 2)) * TAU - Math.PI / 2;
+          var rr = (i % 2) ? rIn : ro;
+          var x = Math.cos(a) * rr, y = Math.sin(a) * rr;
+          if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+        }
+        shape.closePath();
+        var eg = new THREE.ExtrudeGeometry(shape, {
+          depth: 0.13, bevelEnabled: true, bevelSize: 0.045,
+          bevelThickness: 0.045, bevelSegments: 2, curveSegments: 4
+        });
+        eg.center();
+        foodGeoCache.star = eg;
+      }
+      var star = new THREE.Mesh(foodGeoCache.star, MAT.star);
+      star.position.y = 0.62;
+      star.castShadow = true;
+      g.add(star);
+
+    } else if (type === 'donut') {
+      var tor = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.155, 14, 26), MAT.donut);
+      tor.rotation.x = -Math.PI / 2;
+      tor.position.y = 0.55;
+      tor.castShadow = true;
+      g.add(tor);
+      var ic = new THREE.Mesh(new THREE.TorusGeometry(0.315, 0.115, 12, 26), MAT.icing);
+      ic.rotation.x = -Math.PI / 2;
+      ic.position.y = 0.645;
+      g.add(ic);
+      if (!MAT.sprinkle) {
+        MAT.sprinkle = [0xff6b9d, 0x4ecdc4, 0xffd93d, 0x9b7bff, 0x6be07e].map(function (c) {
+          return new THREE.MeshLambertMaterial({ color: c });
+        });
+        foodGeoCache.sprinkle = new THREE.SphereGeometry(0.045, 6, 5);
+      }
+      for (var si = 0; si < 9; si++) {
+        var sa = (si / 9) * TAU;
+        var sp = new THREE.Mesh(foodGeoCache.sprinkle, MAT.sprinkle[si % MAT.sprinkle.length]);
+        sp.position.set(Math.cos(sa) * 0.315, 0.70, Math.sin(sa) * 0.315);
+        sp.scale.set(1.4, 0.7, 1.4);
+        g.add(sp);
+      }
+
+    } else { /* cherry */
+      var cg = new THREE.SphereGeometry(0.215, 16, 13);
+      [-1, 1].forEach(function (s) {
+        var c = new THREE.Mesh(cg, MAT.cherry);
+        c.position.set(0.19 * s, 0.28, 0);
+        c.castShadow = true;
+        g.add(c);
+      });
+      var st1 = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.34, 6), MAT.leaf);
+      st1.position.set(0.1, 0.62, 0); st1.rotation.z = 0.34;
+      g.add(st1);
+      var st2 = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.34, 6), MAT.leaf);
+      st2.position.set(-0.1, 0.62, 0); st2.rotation.z = -0.34;
+      g.add(st2);
+      var lf = new THREE.Mesh(new THREE.SphereGeometry(0.15, 10, 8), MAT.leaf);
+      lf.scale.set(1.5, 0.25, 0.8);
+      lf.position.set(0, 0.8, 0);
+      g.add(lf);
+    }
+
+    /* 地面魔法光圈：淡黄圆盘 + 亮边环，指示位置但不遮挡食物 */
+    var disc = new THREE.Mesh(new THREE.CircleGeometry(0.46, 26), MAT.disc);
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.y = 0.028;
+    g.add(disc);
+
+    var ring = new THREE.Mesh(new THREE.RingGeometry(0.50, 0.64, 34), MAT.ring);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.032;
+    g.add(ring);
+    g.userData.ring = ring;
+
+    return g;
+  }
+
+  var SHARED_GEO = [];
+  function disposeGroup(g) {
+    g.traverse(function (o) {
+      if (o.isMesh && o.geometry) {
+        if (SHARED_GEO.indexOf(o.geometry) >= 0) return;
+        if (o.geometry === foodGeoCache.star || o.geometry === foodGeoCache.sprinkle) return;
+        o.geometry.dispose();
+      }
+    });
+  }
+
+  var FOOD_TYPES = ['apple', 'star', 'donut', 'cherry'];
+
+  function buildFood() {
+    if (food.group) {
+      scene.remove(food.group);
+      disposeGroup(food.group);
+      food.group = null;
+    }
+    food.type = FOOD_TYPES[ri(0, FOOD_TYPES.length - 1)];
+    var g = buildFoodMesh(food.type);
+    g.position.set(gx2w(food.gx), 0.06, gx2w(food.gz));
+    g.scale.setScalar(1.14);
+    scene.add(g);
+    food.group = g;
+  }
+
+  function placeFood() {
+    var occ = {};
+    for (var i = 0; i < snake.cells.length; i++) {
+      occ[cellKey(snake.cells[i].x, snake.cells[i].z)] = 1;
+    }
+    /* 怪兽脚下也不放食物，免得孩子为了吃苹果被撞 */
+    for (var m = 0; m < monsters.length; m++) {
+      occ[cellKey(monsters[m].gx, monsters[m].gz)] = 1;
+    }
+    var free = [];
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        if (!cellFree(G.cells, x, z)) continue;
+        if (occ[cellKey(x, z)]) continue;
+        free.push({ x: x, z: z });
+      }
+    }
+    if (!free.length) return;
+    var c = free[Math.floor(Math.random() * free.length)];
+    food.gx = c.x;
+    food.gz = c.z;
+    buildFood();
+  }
+
+  function updateFood() {
+    var g = food.group;
+    if (!g) return;
+    g.position.y = 0.06 + Math.sin(G.time * 2.3) * 0.05;
+    g.rotation.y = G.time * 1.15;
+    var ring = g.userData.ring;
+    if (ring) {
+      var s = 1 + Math.sin(G.time * 3.1) * 0.14;
+      ring.scale.setScalar(s);
+      ring.rotation.z = G.time * 0.8;
+    }
+  }
+
+  /* =========================================================
+     粒子
+     ========================================================= */
+  var particles = [];
+  var partPool = [];
+  var partGeo = null;
+
+  function spawnBurst(x, y, z, colorHex, n) {
+    if (!partGeo) partGeo = new THREE.SphereGeometry(0.085, 8, 6);
+    /* 护栏：吃得太快时不要无限制堆粒子（每个粒子是一次 draw call） */
+    if (particles.length > 260) n = Math.min(n, 4);
+    for (var i = 0; i < n; i++) {
+      var m = partPool.pop();
+      if (!m) {
+        m = new THREE.Mesh(partGeo, new THREE.MeshBasicMaterial({ transparent: true }));
+      }
+      m.material.color.setHex(colorHex);
+      m.material.opacity = 1;
+      m.material.transparent = true;
+      m.position.set(x + rand(-0.12, 0.12), y + rand(-0.1, 0.25), z + rand(-0.12, 0.12));
+      m.scale.setScalar(rand(0.6, 1.25));
+      m.visible = true;
+      scene.add(m);
+      var a = rand(0, TAU), sp = rand(2.0, 5.0);
+      particles.push({
+        m: m, vx: Math.cos(a) * sp, vy: rand(3.2, 7.4), vz: Math.sin(a) * sp,
+        life: 0, max: rand(0.45, 0.85),
+        spin: rand(-8, 8)
+      });
+    }
+  }
+
+  function updateParticles(dt) {
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.life += dt;
+      if (p.life >= p.max) {
+        scene.remove(p.m);
+        partPool.push(p.m);
+        particles.splice(i, 1);
+        continue;
+      }
+      p.vy -= 15 * dt;
+      p.m.position.x += p.vx * dt;
+      p.m.position.y += p.vy * dt;
+      p.m.position.z += p.vz * dt;
+      if (p.m.position.y < 0.09) { p.m.position.y = 0.09; p.vy *= -0.42; p.vx *= 0.72; p.vz *= 0.72; }
+      p.m.rotation.x += p.spin * dt;
+      p.m.rotation.y += p.spin * 0.7 * dt;
+      var k = 1 - p.life / p.max;
+      p.m.material.opacity = k * k;
+      p.m.scale.setScalar(0.35 + k * 1.05);
+    }
+  }
+
+  /* =========================================================
+     怪兽：果冻小怪
+     - 在自己的格子网络上巡逻，靠近蛇头时改为追踪
+     - 蛇头撞到（或它撞到蛇头）就结束
+     ========================================================= */
+  var MON = { geoBody: null, geoEye: null, geoPup: null, geoRing: null, geoDisc: null };
+  var monsterRoot = null;
+  var CHASE_RANGE = 5;          /* 曼哈顿距离小于这个值开始追 */
+  var HIT_RADIUS = 0.66;
+
+  function ensureMonsterAssets() {
+    if (MON.geoBody) return;
+    MON.geoBody = new THREE.SphereGeometry(0.46, 20, 14);
+    MON.geoEye = new THREE.SphereGeometry(0.155, 12, 10);
+    MON.geoPup = new THREE.SphereGeometry(0.088, 10, 8);
+    MON.geoRing = new THREE.RingGeometry(0.50, 0.63, 30);
+    MON.geoDisc = new THREE.CircleGeometry(0.50, 26);
+  }
+
+  function buildMonsterMesh(colorHex) {
+    var g = new THREE.Group();
+    var mat = new THREE.MeshPhongMaterial({
+      color: colorHex, shininess: 26, specular: 0x2b2b2b,
+      emissive: colorHex, emissiveIntensity: 0.10
+    });
+
+    var body = new THREE.Mesh(MON.geoBody, mat);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    body.scale.set(1, 0.88, 1);
+    g.add(body);
+
+    /* 眼睛朝 +Z，随朝向一起转 */
+    [-1, 1].forEach(function (s) {
+      var e = new THREE.Mesh(MON.geoEye, MAT.eyeWhite);
+      e.position.set(0.180 * s, 0.130, 0.340);
+      e.scale.set(1, 1.05, 0.92);
+      g.add(e);
+      var p = new THREE.Mesh(MON.geoPup, MAT.eyePupil);
+      p.position.set(0.190 * s, 0.140, 0.430);
+      p.scale.set(1, 1.10, 0.55);
+      g.add(p);
+    });
+
+    /* 地面警戒圈：让小朋友一眼看到危险范围 */
+    var disc = new THREE.Mesh(MON.geoDisc, MAT.dangerDisc);
+    disc.rotation.x = -Math.PI / 2;
+    g.add(disc);
+    var ring = new THREE.Mesh(MON.geoRing, MAT.dangerRing);
+    ring.rotation.x = -Math.PI / 2;
+    g.add(ring);
+
+    g.userData.body = body;
+    g.userData.ring = ring;
+    g.userData.disc = disc;
+    g.userData.mat = mat;
+    return g;
+  }
+
+  function disposeMonsters() {
+    for (var i = 0; i < monsters.length; i++) {
+      var m = monsters[i];
+      if (m.group && m.group.userData.mat) m.group.userData.mat.dispose();
+    }
+    monsters.length = 0;
+    if (monsterRoot) {
+      scene.remove(monsterRoot);
+      monsterRoot = null;
+    }
+  }
+
+  /* 找一个离蛇头足够远的空位（避开蛇身、其他怪兽、食物点） */
+  function findMonsterSpawn(minDist, sep) {
+    if (sep === undefined) sep = 3;
+    var head = snake.cells[0] || { x: MC, z: MC };
+    var occ = {};
+    for (var i = 0; i < snake.cells.length; i++) {
+      occ[cellKey(snake.cells[i].x, snake.cells[i].z)] = 1;
+    }
+    for (var m = 0; m < monsters.length; m++) {
+      occ[cellKey(monsters[m].gx, monsters[m].gz)] = 1;
+    }
+    var list = [];
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        if (!cellFree(G.cells, x, z)) continue;
+        if (occ[cellKey(x, z)]) continue;
+        var d = Math.abs(x - head.x) + Math.abs(z - head.z);
+        if (d < minDist) continue;
+        /* 别让两只怪兽叠在一起出生 */
+        var tooClose = false;
+        if (sep > 0) {
+          for (var q = 0; q < monsters.length; q++) {
+            if (Math.abs(x - monsters[q].gx) + Math.abs(z - monsters[q].gz) < sep) { tooClose = true; break; }
+          }
+        }
+        if (tooClose) continue;
+        list.push({ x: x, z: z });
+      }
+    }
+    if (!list.length) return null;
+    return list[Math.floor(Math.random() * list.length)];
+  }
+
+  function spawnMonsters() {
+    disposeMonsters();
+    if (!G.map || !G.map.monsters) return;
+    ensureMonsterAssets();
+
+    monsterRoot = new THREE.Group();
+    monsterRoot.name = 'monsters';
+    scene.add(monsterRoot);
+
+    for (var i = 0; i < G.map.monsters; i++) {
+      var sp = findMonsterSpawn(5, 4);
+      if (!sp) sp = findMonsterSpawn(3, 2);
+      if (!sp) sp = findMonsterSpawn(1, 0);
+      if (!sp) break;
+
+      var color = G.map.monColors[i % G.map.monColors.length];
+      var grp = buildMonsterMesh(color);
+      monsterRoot.add(grp);
+
+      /* 初始朝向：优先选一个能来回走的方向 */
+      var dir = null;
+      for (var k = 0; k < 4; k++) {
+        var d4 = DIR4[(i + k) % 4];
+        if (cellFree(G.cells, sp.x + d4.x, sp.z + d4.z)) { dir = { x: d4.x, z: d4.z }; break; }
+      }
+      if (!dir) dir = { x: 1, z: 0 };
+
+      monsters.push({
+        gx: sp.x, gz: sp.z,
+        px: sp.x, pz: sp.z,
+        wx: gx2w(sp.x), wz: gx2w(sp.z),
+        dir: dir, yaw: Math.atan2(dir.x, dir.z),
+        t: 0, dur: Math.max(0.12, G.monDur),
+        seed: rand(0, TAU),
+        group: grp, color: color
+      });
+    }
+    updateMonsterTransforms();
+  }
+
+  function monsterStep(m) {
+    m.px = m.gx; m.pz = m.gz;
+
+    var opts = [];
+    for (var i = 0; i < 4; i++) {
+      var d = DIR4[i];
+      if (d.x === -m.dir.x && d.z === -m.dir.z) continue;   /* 不原地掉头 */
+      if (!cellFree(G.cells, m.gx + d.x, m.gz + d.z)) continue;
+      opts.push(d);
+    }
+    if (!opts.length) {                                    /* 死胡同才允许回头 */
+      for (var j = 0; j < 4; j++) {
+        var dj = DIR4[j];
+        if (cellFree(G.cells, m.gx + dj.x, m.gz + dj.z)) opts.push(dj);
+      }
+    }
+    if (!opts.length) return;
+
+    var pick = opts[ri(0, opts.length - 1)];
+
+    /* 靠近蛇头就追：选能缩短距离的方向，但有 28% 概率仍随机走（留出逃生机会） */
+    var head = snake.cells[0];
+    if (head) {
+      var dist = Math.abs(head.x - m.gx) + Math.abs(head.z - m.gz);
+      if (dist <= CHASE_RANGE && Math.random() > 0.28) {
+        var best = null, bestD = 1e9;
+        for (var k = 0; k < opts.length; k++) {
+          var nd = Math.abs(head.x - (m.gx + opts[k].x)) + Math.abs(head.z - (m.gz + opts[k].z));
+          if (nd < bestD) { bestD = nd; best = opts[k]; }
+        }
+        if (best) pick = best;
+      }
+    }
+
+    m.dir = { x: pick.x, z: pick.z };
+    m.gx += pick.x;
+    m.gz += pick.z;
+  }
+
+  function updateMonsters(dt) {
+    var live = (G.state === 'playing' || G.state === 'menu') && !G.monFreeze;
+    for (var i = 0; i < monsters.length; i++) {
+      var m = monsters[i];
+      if (live) {
+        m.t += dt;
+        var guard = 0;
+        while (m.t >= m.dur && guard++ < 2) { m.t -= m.dur; monsterStep(m); }
+      }
+      var k = clamp(m.t / m.dur, 0, 1);
+      m.wx = lerp(gx2w(m.px), gx2w(m.gx), k);
+      m.wz = lerp(gx2w(m.pz), gx2w(m.gz), k);
+
+      var yawT = Math.atan2(m.dir.x, m.dir.z);
+      var dy = ((yawT - m.yaw + Math.PI * 3) % TAU) - Math.PI;
+      m.yaw += dy * Math.min(1, dt * 9);
+    }
+    updateMonsterTransforms();
+  }
+
+  function updateMonsterTransforms() {
+    for (var i = 0; i < monsters.length; i++) {
+      var m = monsters[i];
+      var g = m.group;
+      if (!g) continue;
+      var hop = Math.abs(Math.sin(G.time * 4.2 + m.seed));
+      var y = 0.40 + hop * 0.075;
+      g.position.set(m.wx, y, m.wz);
+      g.rotation.y = m.yaw;
+
+      /* 果冻挤压：只缩放身体，警戒圈保持在水平面 */
+      var jig = Math.sin(G.time * 6.6 + m.seed) * 0.10 + hop * 0.05;
+      g.userData.body.scale.set(1 - jig * 0.55, 0.88 + jig, 1 - jig * 0.55);
+
+      var rs = 1 + Math.sin(G.time * 3.4 + m.seed) * 0.10;
+      g.userData.ring.scale.setScalar(rs);
+      g.userData.disc.scale.setScalar(rs);
+      g.userData.ring.position.y = 0.030 - y;
+      g.userData.disc.position.y = 0.026 - y;
+    }
+  }
+
+  /* 蛇头与怪兽的距离判定（用插值位置，过门口相遇也算撞上） */
+  function checkMonsterHit() {
+    if (G.state !== 'playing' || !monsters.length) return;
+    var h = segPos[0] || { x: gx2w(snake.cells[0].x), z: gx2w(snake.cells[0].z) };
+    for (var i = 0; i < monsters.length; i++) {
+      var m = monsters[i];
+      var dx = m.wx - h.x, dz = m.wz - h.z;
+      if (Math.sqrt(dx * dx + dz * dz) < HIT_RADIUS) { die('monster'); return; }
+    }
+  }
+
+  /* =========================================================
+     游戏逻辑
+     ========================================================= */
+  function resetGame() {
+    /* 当前地图的可通行表（按形状复制一份） */
+    prepareMap(G.map);
+    G.cells = new Uint8Array(G.map.ready);
+
+    var sp = findSpawn(G.cells);
+    if (sp) {
+      snake.cells = sp.cells.map(function (c) { return { x: c.x, z: c.z }; });
+      snake.dir = { x: sp.dir.x, z: sp.dir.z };
+    } else {
+      snake.cells = [{ x: MC, z: MC }];
+      snake.dir = { x: 1, z: 0 };
+    }
+    snake.prev = snake.cells.map(function (c) { return { x: c.x, z: c.z }; });
+    snake.queue = [];
+    headYaw = Math.atan2(snake.dir.x, snake.dir.z);
+    headPulse = 0;
+    lastColorLen = -1;
+    segPos.length = 0;
+
+    G.score = 0;
+    G.eaten = 0;
+    G.stepDur = DIFFS[G.diff].step / (G.map.speedK || 1);
+    G.minDur = DIFFS[G.diff].min / (G.map.speedK || 1);
+    G.stepT = 0;
+    G.tMix = 1;
+    G.shake = 0;
+    G.dead = 'wall';
+
+    /* 怪兽节奏跟着难度走：简单档更慢，孩子来得及躲 */
+    var k = clamp(G.stepDur / DIFFS.normal.step, 0.80, 1.35);
+    G.monDur = G.map.monsters ? (1 / G.map.monSpd) * k : 1;
+
+    spawnMonsters();
+    placeFood();
+    updateHud();
+    updateMapTag();
+  }
+
+  /* 换地图：重建场地 + 重开一局（菜单里选图时调用） */
+  function setMap(id) {
+    if (!applyMap(id)) return false;
+    loadBest();
+    buildArena();
+    resetGame();
+    saveMapId();
+    syncMapUI();
+    return true;
+  }
+
+  function saveMapId() {
+    try { localStorage.setItem('snake3d_map', G.mapId); } catch (e) {}
+  }
+  function loadMapId() {
+    var id = 'classic';
+    try {
+      var v = localStorage.getItem('snake3d_map');
+      if (v) id = v;
+    } catch (e) {}
+    for (var i = 0; i < MAPS.length; i++) if (MAPS[i].id === id) return id;
+    return 'classic';
+  }
+
+  function setDir(dx, dz) {
+    if (G.state !== 'playing') return;
+    var last = snake.queue.length ? snake.queue[snake.queue.length - 1] : snake.dir;
+    if (dx === -last.x && dz === -last.z) return;   // 不能 180 度掉头
+    if (dx === last.x && dz === last.z) return;     // 同方向忽略
+    if (snake.queue.length >= 2) return;
+    snake.queue.push({ x: dx, z: dz });
+    Snd.turn();
+  }
+
+  function stepOnce() {
+    if (snake.queue.length) {
+      var nd = snake.queue.shift();
+      if (!(nd.x === -snake.dir.x && nd.z === -snake.dir.z)) snake.dir = nd;
+    }
+
+    var head = snake.cells[0];
+    var nx = head.x + snake.dir.x;
+    var nz = head.z + snake.dir.z;
+
+    if (!cellFree(G.cells, nx, nz)) { die('wall'); return false; }
+
+    /* 一头撞进怪兽所在的格子 */
+    for (var q = 0; q < monsters.length; q++) {
+      if (monsters[q].gx === nx && monsters[q].gz === nz) { die('monster'); return false; }
+    }
+
+    var willGrow = (nx === food.gx && nz === food.gz);
+    var limit = willGrow ? snake.cells.length : snake.cells.length - 1;
+    for (var i = 0; i < limit; i++) {
+      if (snake.cells[i].x === nx && snake.cells[i].z === nz) { die('self'); return false; }
+    }
+
+    snake.prev = snake.cells.map(function (c) { return { x: c.x, z: c.z }; });
+    snake.cells.unshift({ x: nx, z: nz });
+    if (!willGrow) {
+      snake.cells.pop();
+    } else {
+      onEat();
+    }
+    return true;
+  }
+
+  function onEat() {
+    G.score += 10;
+    G.eaten++;
+
+    if (G.eaten % (G.map.accelEvery || 4) === 0) {
+      G.stepDur = Math.max(G.minDur, G.stepDur - ACCEL_STEP);
+    }
+
+    var h = snake.cells[0];
+    var px = gx2w(h.x), pz = gx2w(h.z);
+    spawnBurst(px, 1.0, pz, 0xffd93d, 13);
+    spawnBurst(px, 0.85, pz, 0xffffff, 6);
+    headPulse = 1;
+    Snd.eat();
+    updateHud();
+    bumpScore();
+
+    placeFood();
+    if (G.score > G.best) {
+      G.best = G.score;
+      saveBest();
+    }
+  }
+
+  function die(type) {
+    if (G.state !== 'playing') return;
+    G.dead = type;
+    G.state = 'over';
+    G.shake = 0.62;
+    Snd.over();
+    flash();
+    updateHud();
+
+    var isNew = false;
+    if (G.score > 0 && G.score >= G.best) { isNew = true; }
+    saveBest();
+
+    setTimeout(function () { showOver(isNew); }, 820);
+  }
+
+  /* =========================================================
+     主循环
+     ========================================================= */
+  function update(dt) {
+    G.time += dt;
+
+    if (G.state === 'playing') {
+      G.stepT += dt;
+      var guard = 0;
+      while (G.stepT >= G.stepDur && guard++ < 4) {
+        var dur = G.stepDur;
+        G.stepT -= dur;
+        if (!stepOnce()) { G.stepT = 0; break; }
+      }
+      G.tMix = clamp(G.stepT / G.stepDur, 0, 1);
+    }
+
+    layoutSnake();
+    renderSnake();
+    updateMonsters(dt);
+    checkMonsterHit();
+    updateFood();
+    updateParticles(dt);
+    updateCamera(dt, G.time);
+    updateDecor(dt);
+  }
+
+  function updateCamera(dt, time) {
+    var hp = segPos.length ? segPos[0] : { x: 0, z: 0 };
+    var fx = hp.x * 0.15, fz = hp.z * 0.15;
+
+    var lookZ = 0;
+    if (G.state === 'menu' || G.state === 'over') {
+      /* 菜单时轻微摆动，突出立体感；取景中心前移，让场地位于画面上部不被卡片压住 */
+      var ang = Math.sin(time * 0.24) * 0.20;
+      var ca = Math.cos(ang), sa = Math.sin(ang);
+      v3a.set(baseCam.x * ca - baseCam.z * sa, baseCam.y, baseCam.x * sa + baseCam.z * ca);
+      fx = 0; fz = 0;
+      lookZ = 2.4;
+    } else {
+      v3a.set(baseCam.x + fx, baseCam.y, baseCam.z + fz);
+    }
+
+    var k = 1 - Math.pow(0.0009, dt);
+    camPos.lerp(v3a, k);
+    camera.position.copy(camPos);
+
+    lookTarget.set(fx * 1.15, 0.35, fz * 1.15 + lookZ);
+    camLook.lerp(lookTarget, k);
+    camera.lookAt(camLook);
+
+    if (G.shake > 0.001) {
+      G.shake = Math.max(0, G.shake - dt * 1.7);
+      var amp = G.shake * G.shake * 1.5;
+      camera.position.x += rand(-amp, amp);
+      camera.position.y += rand(-amp, amp);
+      camera.position.z += rand(-amp, amp);
+    }
+  }
+
+  function updateDecor(dt) {
+    var t = G.time;
+    for (var i = 0; i < decor.butterflies.length; i++) {
+      var b = decor.butterflies[i];
+      var u = b.userData;
+      u.a += u.sp * dt;
+      b.position.set(
+        Math.cos(u.a) * u.r,
+        u.y + Math.sin(t * 1.8 + u.a * 2) * 0.35,
+        Math.sin(u.a) * u.r
+      );
+      b.rotation.y = -u.a + Math.PI / 2;
+      var flap = Math.sin(t * 14 + u.a) * 0.62;
+      u.wl.rotation.x = flap;
+      u.wr.rotation.x = flap;
+    }
+    if (decor.clouds) {
+      decor.clouds.position.x = Math.sin(t * 0.035) * 6;
+    }
+  }
+
+  /* =========================================================
+     相机自适应（二分求距离，保证场地完整入画）
+     ========================================================= */
+  function fitCamera() {
+    var w = window.innerWidth, h = Math.max(1, window.innerHeight);
+    var aspect = w / h;
+    camera.aspect = aspect;
+    camera.updateProjectionMatrix();
+
+    var margin = MS * 0.5 * CELL + 0.9;
+    var elev = 46 * DEG;
+    var lo = 8, hi = 130;
+    var P = new THREE.Vector3();
+    var corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+
+    for (var it = 0; it < 34; it++) {
+      var d = (lo + hi) / 2;
+      camera.position.set(0, Math.sin(elev) * d, Math.cos(elev) * d);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld(true);
+      camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+
+      var ok = true;
+      for (var c = 0; c < 4; c++) {
+        P.set(corners[c][0] * margin, 1.05, corners[c][1] * margin).project(camera);
+        if (Math.abs(P.x) > 0.93 || Math.abs(P.y) > 0.90) { ok = false; break; }
+      }
+      if (ok) hi = d; else lo = d;
+    }
+
+    baseCam.set(0, Math.sin(elev) * hi, Math.cos(elev) * hi);
+  }
+
+  /* =========================================================
+     界面
+     ========================================================= */
+  var el = {};
+
+  function cacheEls() {
+    el.menu = document.getElementById('menu');
+    el.pause = document.getElementById('pause');
+    el.over = document.getElementById('over');
+    el.hud = document.getElementById('hud');
+    el.score = document.getElementById('score');
+    el.best = document.getElementById('best');
+    el.chipScore = document.getElementById('chipScore');
+    el.statScore = document.getElementById('statScore');
+    el.statBest = document.getElementById('statBest');
+    el.newBest = document.getElementById('newBest');
+    el.overTitle = document.getElementById('overTitle');
+    el.overSub = document.getElementById('overSub');
+    el.btnSound = document.getElementById('btnSound');
+    el.icoOn = document.getElementById('icoSoundOn');
+    el.icoOff = document.getElementById('icoSoundOff');
+    el.maps = document.getElementById('maps');
+    el.mapNote = document.getElementById('mapNote');
+    el.mapTag = document.getElementById('mapTag');
+  }
+
+  function updateHud() {
+    el.score.textContent = G.score;
+    el.best.textContent = G.best;
+  }
+
+  function updateMapTag() {
+    if (!el.mapTag) return;
+    el.mapTag.textContent = G.map.name + (G.map.monsters ? ' · ' + G.map.monsters + ' 怪兽' : ' · 无怪兽');
+  }
+
+  /* 用可通行表直接画一张迷你形状图，保证和真实场地完全一致 */
+  function mapSvg(m) {
+    var c = m.ready || m.cells;
+    var g = 100 / MS;
+    var s = '<svg viewBox="0 0 100 100" aria-hidden="true">';
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        if (!cellFree(c, x, z)) continue;
+        s += '<rect x="' + (x * g).toFixed(2) + '" y="' + (z * g).toFixed(2) +
+          '" width="' + g.toFixed(2) + '" height="' + g.toFixed(2) + '"/>';
+      }
+    }
+    return s + '</svg>';
+  }
+
+  function buildMapUI() {
+    if (!el.maps) return;
+    var html = '';
+    for (var i = 0; i < MAPS.length; i++) {
+      var m = MAPS[i];
+      prepareMap(m);
+      html += '<button class="mapcard" data-map="' + m.id + '" type="button">' +
+        '<span class="mpv">' + mapSvg(m) + '</span>' +
+        '<span class="mpn">' + m.name + '</span></button>';
+    }
+    el.maps.innerHTML = html;
+
+    var cards = el.maps.querySelectorAll('.mapcard');
+    for (var k = 0; k < cards.length; k++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          if (G.state === 'playing' || G.state === 'paused') return;
+          if (btn.getAttribute('data-map') === G.mapId) return;
+          setMap(btn.getAttribute('data-map'));
+        });
+      })(cards[k]);
+    }
+    syncMapUI();
+  }
+
+  function syncMapUI() {
+    if (el.maps) {
+      var cards = el.maps.querySelectorAll('.mapcard');
+      for (var i = 0; i < cards.length; i++) {
+        cards[i].classList.toggle('active', cards[i].getAttribute('data-map') === G.mapId);
+      }
+    }
+    if (el.mapNote) el.mapNote.textContent = G.map.note;
+    updateMapTag();
+  }
+
+  function bumpScore() {
+    el.chipScore.classList.remove('bump');
+    void el.chipScore.offsetWidth;
+    el.chipScore.classList.add('bump');
+  }
+
+  function flash() {
+    var f = document.createElement('div');
+    f.style.cssText = 'position:fixed;inset:0;z-index:15;pointer-events:none;' +
+      'background:radial-gradient(circle at 50% 50%, rgba(255,90,90,0.05), rgba(255,60,60,0.55));' +
+      'opacity:0;transition:opacity .06s';
+    document.body.appendChild(f);
+    requestAnimationFrame(function () { f.style.opacity = '1'; });
+    setTimeout(function () {
+      f.style.transition = 'opacity .55s';
+      f.style.opacity = '0';
+    }, 110);
+    setTimeout(function () {
+      if (f.parentNode) f.parentNode.removeChild(f);
+    }, 800);
+  }
+
+  /* 最高分按地图分别记：每张图的难度差别很大，混在一起不公平 */
+  function bestKey() { return 'snake3d_best_' + G.mapId; }
+
+  function saveBest() {
+    try { localStorage.setItem(bestKey(), String(G.best)); } catch (e) {}
+  }
+  function loadBest() {
+    var v = 0;
+    try {
+      var raw = localStorage.getItem(bestKey());
+      /* 经典方形兼容旧版的存档键 */
+      if (raw === null && G.mapId === 'classic') raw = localStorage.getItem('snake3d_best');
+      v = parseInt(raw || '0', 10);
+    } catch (e) { v = 0; }
+    G.best = isNaN(v) ? 0 : v;
+  }
+
+  function startGame() {
+    Snd.init();
+    Snd.resume();
+    Snd.startMusic();
+    Snd.start();
+
+    resetGame();
+    el.menu.classList.add('hidden');
+    el.over.classList.add('hidden');
+    el.pause.classList.add('hidden');
+    el.hud.classList.add('show');
+    G.state = 'playing';
+    /* 相机立刻归位，避免从菜单摆动角度慢慢飘过来 */
+    camera.position.copy(baseCam);
+    camPos.copy(baseCam);
+    camLook.set(0, 0.35, 0);
+  }
+
+  function pauseGame() {
+    if (G.state !== 'playing') return;
+    G.state = 'paused';
+    el.hud.classList.remove('show');
+    el.pause.classList.remove('hidden');
+  }
+
+  function resumeGame() {
+    if (G.state !== 'paused') return;
+    G.state = 'playing';
+    el.pause.classList.add('hidden');
+    el.hud.classList.add('show');
+    Snd.resume();
+  }
+
+  function toMenu() {
+    G.state = 'menu';
+    el.pause.classList.add('hidden');
+    el.over.classList.add('hidden');
+    el.hud.classList.remove('show');
+    el.menu.classList.remove('hidden');
+    resetGame();
+  }
+
+  function showOver(isNew) {
+    if (G.state !== 'over') return;
+    el.statScore.textContent = G.score;
+    el.statBest.textContent = G.best;
+    el.newBest.classList.toggle('show', !!isNew);
+    el.hud.classList.remove('show');
+    if (G.dead === 'wall') {
+      el.overTitle.textContent = '哎呀，撞到墙了';
+      el.overSub.textContent = '下次记得提前转弯哦';
+    } else if (G.dead === 'monster') {
+      el.overTitle.textContent = '被小怪兽碰到了';
+      el.overSub.textContent = '看到红色圈圈要绕开哦';
+    } else {
+      el.overTitle.textContent = '哎呀，吃到自己了';
+      el.overSub.textContent = '身体越长，越要小心呀';
+    }
+    el.over.classList.remove('hidden');
+  }
+
+  /* ---------------- 事件 ---------------- */
+  function bindEvents() {
+    /* 难度选择 */
+    var pills = document.querySelectorAll('.pill');
+    for (var i = 0; i < pills.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          for (var k = 0; k < pills.length; k++) pills[k].classList.remove('active');
+          btn.classList.add('active');
+          G.diff = btn.getAttribute('data-diff');
+        });
+      })(pills[i]);
+    }
+
+    document.getElementById('btnStart').addEventListener('click', startGame);
+    document.getElementById('btnRetry').addEventListener('click', startGame);
+    document.getElementById('btnHome').addEventListener('click', toMenu);
+    document.getElementById('btnQuit').addEventListener('click', toMenu);
+    document.getElementById('btnResume').addEventListener('click', resumeGame);
+    document.getElementById('btnPause').addEventListener('click', function () {
+      if (G.state === 'playing') pauseGame();
+      else if (G.state === 'paused') resumeGame();
+    });
+    el.btnSound.addEventListener('click', function () {
+      G.soundOn = !G.soundOn;
+      el.icoOn.style.display = G.soundOn ? '' : 'none';
+      el.icoOff.style.display = G.soundOn ? 'none' : '';
+      if (!G.soundOn) { Snd.stopMusic(); }
+      else { Snd.resume(); if (G.state === 'playing') { Snd.timer = null; Snd.startMusic(); } }
+    });
+
+    /* 键盘 */
+    window.addEventListener('keydown', function (e) {
+      var k = e.key;
+      if (k === 'ArrowUp' || k === 'w' || k === 'W') { setDir(0, -1); e.preventDefault(); }
+      else if (k === 'ArrowDown' || k === 's' || k === 'S') { setDir(0, 1); e.preventDefault(); }
+      else if (k === 'ArrowLeft' || k === 'a' || k === 'A') { setDir(-1, 0); e.preventDefault(); }
+      else if (k === 'ArrowRight' || k === 'd' || k === 'D') { setDir(1, 0); e.preventDefault(); }
+      else if (k === ' ' || k === 'Escape' || k === 'p' || k === 'P') {
+        e.preventDefault();
+        if (G.state === 'playing') pauseGame();
+        else if (G.state === 'paused') resumeGame();
+      }
+      else if (k === 'Enter') {
+        if (G.state === 'menu' || G.state === 'over') { e.preventDefault(); startGame(); }
+      }
+    }, { passive: false });
+
+    /* 触摸滑动 */
+    var startPt = null;
+    canvas.addEventListener('touchstart', function (e) {
+      if (e.touches.length > 1) { e.preventDefault(); return; }
+      startPt = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', function (e) {
+      if (e.touches.length > 1) e.preventDefault();
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', function (e) {
+      if (!startPt) return;
+      var t = e.changedTouches[0];
+      var dx = t.clientX - startPt.x;
+      var dy = t.clientY - startPt.y;
+      startPt = null;
+      if (Math.sqrt(dx * dx + dy * dy) < 22) return;
+      if (Math.abs(dx) > Math.abs(dy)) setDir(dx > 0 ? 1 : -1, 0);
+      else setDir(0, dy > 0 ? 1 : -1);
+    });
+
+    /* 方向按钮 */
+    var dpads = document.querySelectorAll('.dpad');
+    var MAP = { u: [0, -1], d: [0, 1], l: [-1, 0], r: [1, 0] };
+    for (var j = 0; j < dpads.length; j++) {
+      (function (btn) {
+        var d = btn.getAttribute('data-d');
+        btn.addEventListener('pointerdown', function (e) {
+          e.preventDefault();
+          setDir(MAP[d][0], MAP[d][1]);
+          btn.classList.add('on');
+          setTimeout(function () { btn.classList.remove('on'); }, 110);
+        });
+      })(dpads[j]);
+    }
+
+    /* 尺寸变化（防抖，避免 iOS 软键盘抖动） */
+    var rzTimer = null;
+    function onResize() {
+      if (rzTimer) clearTimeout(rzTimer);
+      rzTimer = setTimeout(applySize, 180);
+    }
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+
+    /* 页面隐藏时自动暂停 */
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden && G.state === 'playing') pauseGame();
+    });
+
+    /* 阻止 iOS 双指缩放与手势 */
+    document.addEventListener('gesturestart', function (e) { e.preventDefault(); }, { passive: false });
+    document.addEventListener('dblclick', function (e) { e.preventDefault(); }, { passive: false });
+  }
+
+  function applySize() {
+    var w = window.innerWidth, h = Math.max(1, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(w, h, false);
+    fitCamera();
+    camPos.copy(baseCam);
+    camera.position.copy(baseCam);
+  }
+
+  /* =========================================================
+     启动
+     ========================================================= */
+  function boot() {
+    renderer = new THREE.WebGLRenderer({
+      canvas: canvas, antialias: true, alpha: false, powerPreference: 'high-performance'
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0xcde9f8, 78, 210);
+    scene.background = null;
+
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.2, 420);
+
+    /* 灯光（r155+ 物理光照单位，强度需比旧版明显更高） */
+    scene.add(new THREE.HemisphereLight(0xd8f0ff, 0x7dc455, 1.18));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.26));
+
+    sunLight = new THREE.DirectionalLight(0xfff8e8, 1.95);
+    sunLight.position.set(11, 21, 13);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.set(2048, 2048);
+    var sc = sunLight.shadow.camera;
+    sc.left = -11; sc.right = 11; sc.top = 11; sc.bottom = -11;
+    sc.near = 2; sc.far = 60;
+    sunLight.shadow.bias = -0.0004;
+    sunLight.shadow.normalBias = 0.006;
+    scene.add(sunLight);
+    scene.add(sunLight.target);
+    sunLight.target.position.set(0, 0, 0);
+
+    initMaterials();
+    buildSky();
+    fitCamera();          /* 先算出相机距离，树木分布据此自适应 */
+    applyMap(loadMapId());
+    buildWorld();
+    buildSnake();
+
+    clock = new THREE.Clock();
+    cacheEls();
+    buildMapUI();
+    bindEvents();
+    loadBest();
+    updateHud();
+
+    /* 触屏设备显示方向键 */
+    var coarse = false;
+    try { coarse = window.matchMedia('(pointer: coarse)').matches; } catch (e) { coarse = false; }
+    if (coarse || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)) {
+      document.body.classList.add('touch');
+    }
+
+    applySize();
+    resetGame();
+    G.state = 'menu';
+
+    loop();
+    window.SNAKE.ready = true;
+
+    var bootEl = document.getElementById('boot');
+    if (bootEl) {
+      bootEl.classList.add('done');
+      setTimeout(function () {
+        if (bootEl.parentNode) bootEl.parentNode.removeChild(bootEl);
+      }, 600);
+    }
+  }
+
+  function loop() {
+    requestAnimationFrame(loop);
+    var dt = Math.min(clock.getDelta(), 0.1);
+    update(dt);
+    renderer.render(scene, camera);
+  }
+
+  /* =========================================================
+     调试接口（自动化验收用）
+     ========================================================= */
+  window.SNAKE = {
+    errs: errors,
+    ready: false,
+    get state() { return G.state; },
+    get score() { return G.score; },
+    get best() { return G.best; },
+    get len() { return snake.cells.length; },
+    get head() { return { x: snake.cells[0].x, z: snake.cells[0].z }; },
+    get dir() { return { x: snake.dir.x, z: snake.dir.z }; },
+    get foodCell() { return { gx: food.gx, gz: food.gz }; },
+    get stepDur() { return G.stepDur; },
+    get tMix() { return G.tMix; },
+    get mapId() { return G.mapId; },
+    get mapName() { return G.map.name; },
+    get monsterCount() { return monsters.length; },
+    get dead() { return G.dead; },
+
+    maps: function () {
+      return MAPS.map(function (m) {
+        return { id: m.id, name: m.name, monsters: m.monsters, speedK: m.speedK, free: m.freeCount };
+      });
+    },
+    mapInfo: function () {
+      return {
+        id: G.mapId, name: G.map.name, monsters: G.map.monsters,
+        free: G.map.freeCount, total: MS * MS,
+        cells: Array.prototype.slice.call(G.cells)
+      };
+    },
+    isFree: function (x, z) { return cellFree(G.cells, x, z); },
+    setMap: function (id) {
+      if (G.state === 'playing' || G.state === 'paused') toMenu();
+      return setMap(id);
+    },
+    monsters: function () {
+      return monsters.map(function (m) {
+        return {
+          gx: m.gx, gz: m.gz, x: +m.wx.toFixed(3), z: +m.wz.toFixed(3),
+          dir: { x: m.dir.x, z: m.dir.z }
+        };
+      });
+    },
+    freezeMonsters: function (v) {
+      G.monFreeze = v !== false;
+      return G.monFreeze;
+    },
+    /* 把第 i 只怪兽直接摆到某格（测试碰撞用） */
+    putMonster: function (i, x, z) {
+      var m = monsters[i];
+      if (!m) return null;
+      m.gx = m.px = x; m.gz = m.pz = z;
+      m.wx = gx2w(x); m.wz = gx2w(z);
+      m.t = 0;
+      updateMonsterTransforms();
+      return { gx: m.gx, gz: m.gz };
+    },
+    /* 确定性驱动：直接推进怪兽 n 步（路径合法性测试用） */
+    stepMonsters: function (n) {
+      var trace = [];
+      for (var k = 0; k < (n || 1); k++) {
+        for (var i = 0; i < monsters.length; i++) monsterStep(monsters[i]);
+        for (var j = 0; j < monsters.length; j++) trace.push({ x: monsters[j].gx, z: monsters[j].gz });
+      }
+      updateMonsterTransforms();
+      return trace;
+    },
+    clearMonsters: function () {
+      disposeMonsters();
+      return monsters.length;
+    },
+    addMonster: function (x, z) {
+      ensureMonsterAssets();
+      /* 落到墙里就修正到最近的可通行格，避免怪兽卡死不动 */
+      if (!cellFree(G.cells, x, z)) {
+        var best = null, bestD = 1e9;
+        for (var zz = 0; zz < MS; zz++) {
+          for (var xx = 0; xx < MS; xx++) {
+            if (!cellFree(G.cells, xx, zz)) continue;
+            var dd = Math.abs(xx - x) + Math.abs(zz - z);
+            if (dd < bestD) { bestD = dd; best = { x: xx, z: zz }; }
+          }
+        }
+        if (best) { x = best.x; z = best.z; }
+      }
+      if (!monsterRoot) {
+        monsterRoot = new THREE.Group();
+        monsterRoot.name = 'monsters';
+        scene.add(monsterRoot);
+      }
+      var grp = buildMonsterMesh(0xa06be0);
+      monsterRoot.add(grp);
+      monsters.push({
+        gx: x, gz: z, px: x, pz: z, wx: gx2w(x), wz: gx2w(z),
+        dir: { x: 1, z: 0 }, yaw: Math.PI / 2, t: 0,
+        dur: Math.max(0.12, G.monDur), seed: 0, group: grp, color: 0xa06be0
+      });
+      updateMonsterTransforms();
+      return monsters.length;
+    },
+
+    stats: function () {
+      return {
+        state: G.state,
+        map: G.mapId,
+        score: G.score,
+        best: G.best,
+        dead: G.dead,
+        len: snake.cells.length,
+        head: { x: snake.cells[0].x, z: snake.cells[0].z },
+        dir: { x: snake.dir.x, z: snake.dir.z },
+        food: { gx: food.gx, gz: food.gz },
+        stepDur: +G.stepDur.toFixed(4),
+        minDur: +G.minDur.toFixed(4),
+        monsters: monsters.length,
+        monsterPos: monsters.map(function (m) { return { x: m.gx, z: m.gz }; }),
+        cam: {
+          x: +camera.position.x.toFixed(2),
+          y: +camera.position.y.toFixed(2),
+          z: +camera.position.z.toFixed(2)
+        },
+        tris: renderer.info.render.triangles,
+        calls: renderer.info.render.calls,
+        geo: renderer.info.memory.geometries,
+        tex: renderer.info.memory.textures,
+        particles: particles.length,
+        errs: errors.slice()
+      };
+    },
+
+    setDir: setDir,
+    start: function (d) {
+      if (d) {
+        G.diff = d;
+        var pills = document.querySelectorAll('.pill');
+        for (var i = 0; i < pills.length; i++) {
+          pills[i].classList.toggle('active', pills[i].getAttribute('data-diff') === d);
+        }
+      }
+      startGame();
+      return G.state;
+    },
+    pause: pauseGame,
+    resume: resumeGame,
+    menu: toMenu,
+    forceFood: function (x, z) {
+      if (food.gx === x && food.gz === z && food.group) return { gx: food.gx, gz: food.gz };
+      food.gx = x; food.gz = z; buildFood();
+      return { gx: food.gx, gz: food.gz };
+    },
+    setCells: function (arr, dx, dz) {
+      snake.cells = arr.map(function (c) { return { x: c[0], z: c[1] }; });
+      snake.prev = snake.cells.map(function (c) { return { x: c.x, z: c.z }; });
+      snake.dir = { x: dx || 0, z: dz || 0 };
+      snake.queue = [];
+      headYaw = Math.atan2(snake.dir.x, snake.dir.z);
+      lastColorLen = -1;
+      return snake.cells.length;
+    },
+    step: function () { return G.state === 'playing' ? stepOnce() : false; },
+    setStepDur: function (v) { G.stepDur = v; return G.stepDur; },
+    audio: function () {
+      return { ctx: Snd.ctx ? Snd.ctx.state : null, ok: Snd.ok, music: !!Snd.timer, on: G.soundOn };
+    },
+    placeHead: function (x, z, dx, dz) {
+      snake.cells = [{ x: x, z: z }];
+      for (var i = 1; i < 3; i++) snake.cells.push({ x: x - (dx || 1) * i, z: z - (dz || 0) * i });
+      snake.prev = snake.cells.map(function (c) { return { x: c.x, z: c.z }; });
+      snake.dir = { x: dx || 1, z: dz || 0 };
+      snake.queue = [];
+      lastColorLen = -1;
+      return snake.cells[0];
+    },
+    cells: function () {
+      return snake.cells.map(function (c) { return { x: c.x, z: c.z }; });
+    },
+    scene: function () { return scene; },
+    camera: function () { return camera; },
+    renderer: function () { return renderer; }
+  };
+
+  /* 启动 */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();

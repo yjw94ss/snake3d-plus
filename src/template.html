@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#7dc8f7">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>3D 贪吃蛇 · 小小探险</title>
+<style>
+__CSS__
+</style>
+</head>
+<body>
+<div id="boot">
+  <div class="boot-ring"></div>
+  <div class="boot-text">正在叫醒小蛇…</div>
+</div>
+
+<canvas id="c"></canvas>
+
+<!-- ================= HUD ================= -->
+<div id="hud">
+  <div class="hud-top">
+    <div class="chip" id="chipScore">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#e94b4b" d="M12 7.9C9.1 6.3 5.7 8.4 5.7 12.2c0 4.2 4 8 6.3 8s6.3-3.8 6.3-8c0-3.8-3.4-5.9-6.3-4.3z"/>
+        <path fill="#5fbb52" d="M12.5 7.8c0-2.1 1.4-3.6 3.3-3.9.2 2.1-1.4 3.7-3.3 3.9z"/>
+        <rect x="11.7" y="4.4" width="1.3" height="3.9" rx=".65" fill="#8b5e3c"/>
+      </svg>
+      <span id="score">0</span>
+    </div>
+    <div class="chip best" id="chipBest">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#e6a720" d="M7 3h10v3.6a5 5 0 0 1-3.6 4.8v3.9h2.4a1 1 0 0 1 1 1V19H7.2v-2.7a1 1 0 0 1 1-1h2.4v-3.9A5 5 0 0 1 7 6.6V3z"/>
+        <path fill="#c98f13" d="M4.6 6.2h2.2v3.1c0 .9.4 1.7 1 2.3-.1 0-.2-.1-.3-.1H5.9A1.3 1.3 0 0 1 4.6 10.2V6.2zm12.6 0h2.2v4a1.3 1.3 0 0 1-1.3 1.3h-1.6l-.3.1c.6-.6 1-1.4 1-2.3V6.2z"/>
+      </svg>
+      <span id="best">0</span>
+    </div>
+    <div class="spacer"></div>
+    <button class="icon-btn" id="btnSound" aria-label="音效开关">
+      <svg id="icoSoundOn" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 9.5h3L11.5 6v12L7 14.5H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1z"/>
+        <path d="M14.6 8.4a5 5 0 0 1 0 7.2l-1.3-1.3a3.2 3.2 0 0 0 0-4.6l1.3-1.3z"/>
+        <path d="M17.2 5.8a8.6 8.6 0 0 1 0 12.4l-1.3-1.3a6.8 6.8 0 0 0 0-9.8l1.3-1.3z"/>
+      </svg>
+      <svg id="icoSoundOff" viewBox="0 0 24 24" style="display:none" aria-hidden="true">
+        <path d="M4 9.5h3L11.5 6v12L7 14.5H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1z"/>
+        <path d="M15.1 9.4l1.3-1.3 5 5-1.3 1.3-5-5z" transform="translate(-1.6 .4)"/>
+        <path d="M20.1 9.4l1.3 1.3-5 5-1.3-1.3 5-5z" transform="translate(-1.6 .4)"/>
+      </svg>
+    </button>
+    <button class="icon-btn" id="btnPause" aria-label="暂停">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="6.5" y="5" width="4" height="14" rx="1.6"/>
+        <rect x="13.5" y="5" width="4" height="14" rx="1.6"/>
+      </svg>
+    </button>
+  </div>
+
+  <div id="mapTag"></div>
+
+  <div id="pad">
+    <button class="dpad" data-d="u" aria-label="上"><svg viewBox="0 0 24 24"><path d="M12 5.2l7 8.6H5z"/></svg></button>
+    <button class="dpad" data-d="l" aria-label="左"><svg viewBox="0 0 24 24"><path d="M5.2 12l8.6-7v14z"/></svg></button>
+    <button class="dpad" data-d="r" aria-label="右"><svg viewBox="0 0 24 24"><path d="M18.8 12l-8.6 7V5z"/></svg></button>
+    <button class="dpad" data-d="d" aria-label="下"><svg viewBox="0 0 24 24"><path d="M12 18.8l-7-8.6h14z"/></svg></button>
+  </div>
+</div>
+
+<!-- ================= 开始界面 ================= -->
+<div id="menu" class="screen">
+  <div class="card">
+    <div class="mark">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <defs>
+          <linearGradient id="sg" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0" stop-color="#8eeaa4"/>
+            <stop offset="1" stop-color="#20a457"/>
+          </linearGradient>
+        </defs>
+        <path d="M15 51C15 39 26 38.5 32 46.5S50 53 50 41 37 26.5 30.5 32.5"
+              fill="none" stroke="url(#sg)" stroke-width="10.5" stroke-linecap="round"/>
+        <circle cx="30.5" cy="30.5" r="9.2" fill="#2fbb63"/>
+        <circle cx="27" cy="28" r="3.4" fill="#fff"/>
+        <circle cx="34" cy="28" r="3.4" fill="#fff"/>
+        <circle cx="27.7" cy="28.7" r="1.7" fill="#1d2b3d"/>
+        <circle cx="33.3" cy="28.7" r="1.7" fill="#1d2b3d"/>
+        <path d="M27.6 35.2q3 2.6 6 0" stroke="#12834a" stroke-width="2" fill="none" stroke-linecap="round"/>
+        <circle cx="22.6" cy="33.4" r="2.1" fill="#ffb3c8" opacity=".85"/>
+        <circle cx="38.4" cy="33.4" r="2.1" fill="#ffb3c8" opacity=".85"/>
+      </svg>
+    </div>
+    <h1 class="title">3D 贪吃蛇</h1>
+    <p class="subtitle">带小绿蛇去吃水果，每吃一口就长一截！</p>
+
+    <div class="diffs" id="diffs">
+      <button class="pill" data-diff="easy">慢慢爬<small>4 岁 +</small></button>
+      <button class="pill active" data-diff="normal">刚刚好<small>推荐</small></button>
+      <button class="pill" data-diff="hard">再快些<small>小高手</small></button>
+    </div>
+
+    <div class="maps-lab">选 一 张 地 图</div>
+    <div class="maps" id="maps"></div>
+    <p class="mapnote" id="mapNote"></p>
+
+    <button class="btn btn-primary" id="btnStart">开 始 游 戏</button>
+    <p class="hint">方向键 / <b>W A S D</b> / 手指滑动 都能转弯<br>躲开红色圈圈的小怪兽，撞墙或咬到自己就结束啦</p>
+  </div>
+</div>
+
+<!-- ================= 暂停界面 ================= -->
+<div id="pause" class="screen hidden">
+  <div class="card">
+    <div class="pause-badge">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="6" y="4.5" width="4.2" height="15" rx="1.8"/>
+        <rect x="13.8" y="4.5" width="4.2" height="15" rx="1.8"/>
+      </svg>
+    </div>
+    <h2 class="end-title">休息一下</h2>
+    <p class="subtitle" style="margin-bottom:20px">小蛇在原地等你回来</p>
+    <button class="btn btn-primary" id="btnResume">继 续 玩</button>
+    <button class="btn btn-ghost" id="btnQuit">回到开头</button>
+  </div>
+</div>
+
+<!-- ================= 结束界面 ================= -->
+<div id="over" class="screen hidden">
+  <div class="card">
+    <div class="face">
+      <svg viewBox="0 0 80 80" aria-hidden="true">
+        <circle cx="40" cy="40" r="33" fill="#ffe9a8"/>
+        <circle cx="40" cy="40" r="33" fill="none" stroke="#f2c94c" stroke-width="4"/>
+        <path d="M26 32l7 7M33 32l-7 7" stroke="#8a6212" stroke-width="3.4" stroke-linecap="round" fill="none"/>
+        <path d="M54 32l7 7M61 32l-7 7" stroke="#8a6212" stroke-width="3.4" stroke-linecap="round" fill="none"/>
+        <path d="M29 55q5.5-5 11 0t11 0" stroke="#8a6212" stroke-width="3.4" stroke-linecap="round" fill="none"/>
+        <circle cx="20" cy="47" r="4" fill="#ffb3c8" opacity=".8"/>
+        <circle cx="60" cy="47" r="4" fill="#ffb3c8" opacity=".8"/>
+      </svg>
+    </div>
+    <h2 class="end-title" id="overTitle">哎呀，撞到啦</h2>
+    <p class="subtitle" id="overSub">没关系，再试一次会更棒！</p>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="num" id="statScore">0</div>
+        <div class="lab">这 局 得 分</div>
+      </div>
+      <div class="stat">
+        <div class="num gold" id="statBest">0</div>
+        <div class="lab">最 高 分</div>
+      </div>
+    </div>
+    <div class="newbest" id="newBest">新的最高分！</div>
+
+    <button class="btn btn-primary" id="btnRetry">再 来 一 次</button>
+    <button class="btn btn-ghost" id="btnHome">回到开头</button>
+  </div>
+</div>
+
+<script>
+__THREE__
+</script>
+<script>
+__GAME__
+</script>
+</body>
+</html>
