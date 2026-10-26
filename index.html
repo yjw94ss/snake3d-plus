@@ -760,57 +760,53 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   /* 在形状内找一段 3 格直线作为出生位，返回蛇身（头在前）与朝向 */
   var DIR4 = [{ x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }];
 
+  /* 从某格沿某方向连续可走的格数（不含起点） */
+  function runway(cells, x, z, d, max) {
+    var n = 0;
+    while (n < max && cellFree(cells, x + d.x * (n + 1), z + d.z * (n + 1))) n++;
+    return n;
+  }
+
+  /* 选出生位：头要尽量居中，但前方要有足够跑道，身后要放得下 2 节身体
+     —— 否则一开局 1 秒内就撞墙，小朋友来不及反应。 */
   function findSpawn(cells) {
-    var best = null, bestD = 1e9;
+    var best = null, bestScore = -1e9;
+    var BEST_RUN = 6;
+
     for (var z = 0; z < MS; z++) {
       for (var x = 0; x < MS; x++) {
         if (!cellFree(cells, x, z)) continue;
-        var d = Math.abs(x - MC) + Math.abs(z - MC);
-        if (d < bestD) { bestD = d; best = { x: x, z: z }; }
+        for (var i = 0; i < 4; i++) {
+          var d = DIR4[i];
+          var back = runway(cells, x, z, { x: -d.x, z: -d.z }, 2);
+          if (back < 2) continue;                       /* 身体放不下就换方向 */
+          var ahead = runway(cells, x, z, d, BEST_RUN + 4);
+          if (ahead < 2) continue;
+          var centerness = 1 - (Math.abs(x - MC) + Math.abs(z - MC)) / (MS * 2);
+          /* 跑道权重远高于居中，跑道相同时才看谁更靠中间 */
+          var score = Math.min(ahead, BEST_RUN) * 10 + centerness * 6;
+          if (score > bestScore) {
+            bestScore = score;
+            best = { x: x, z: z, dir: d };
+          }
+        }
       }
     }
-    if (!best) return null;
-    /* 以最近中心点为基准，找一个能容下 3 格直线的方向 */
-    for (var i = 0; i < 4; i++) {
-      var d0 = DIR4[i];
-      /* 头放在 t=+2，身为 t=+1、t=0，这样头前方还有余量 */
-      var ok = true;
-      for (var t = -2; t <= 4; t++) {
-        if (!cellFree(cells, best.x + d0.x * t, best.z + d0.z * t)) { ok = false; break; }
-      }
-      if (ok) {
-        return {
-          cells: [
-            { x: best.x + d0.x * 2, z: best.z + d0.z * 2 },
-            { x: best.x + d0.x, z: best.z + d0.z },
-            { x: best.x, z: best.z }
-          ],
-          dir: { x: d0.x, z: d0.z }
-        };
-      }
+
+    if (best) {
+      return {
+        cells: [
+          { x: best.x, z: best.z },
+          { x: best.x - best.dir.x, z: best.z - best.dir.z },
+          { x: best.x - best.dir.x * 2, z: best.z - best.dir.z * 2 }
+        ],
+        dir: { x: best.dir.x, z: best.dir.z }
+      };
     }
-    /* 退路：只要 3 格直线 */
-    for (var j = 0; j < 4; j++) {
-      var dj = DIR4[j];
-      var ok2 = true;
-      for (var s = 0; s <= 2; s++) {
-        if (!cellFree(cells, best.x + dj.x * s, best.z + dj.z * s)) { ok2 = false; break; }
-      }
-      if (ok2) {
-        return {
-          cells: [
-            { x: best.x + dj.x * 2, z: best.z + dj.z * 2 },
-            { x: best.x + dj.x, z: best.z + dj.z },
-            { x: best.x, z: best.z }
-          ],
-          dir: { x: dj.x, z: dj.z }
-        };
-      }
-    }
-    return {
-      cells: [{ x: best.x, z: best.z }],
-      dir: { x: 1, z: 0 }
-    };
+
+    /* 极端窄地图：退化为 1 格 */
+    var cf = centerFree(cells);
+    return { cells: [{ x: cf.x, z: cf.z }], dir: { x: 1, z: 0 } };
   }
 
   /* ---------- 五张地图 ---------- */
