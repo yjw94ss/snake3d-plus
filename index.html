@@ -329,6 +329,32 @@ body {
   white-space: nowrap;
 }
 
+/* 屏幕中央的短提示（金苹果 / 怪兽增援） */
+#toast {
+  position: absolute;
+  left: 50%;
+  top: 32%;
+  transform: translate(-50%, 6px) scale(.72);
+  padding: 8px 20px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: .5px;
+  color: #7a4a00;
+  background: linear-gradient(180deg, #fff3bb, #ffcf3d);
+  box-shadow: 0 9px 24px rgba(120, 70, 0, .30), inset 0 1px 0 #fff;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  transition: opacity .16s, transform .30s cubic-bezier(.2, 1.6, .4, 1);
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+#toast.t-warn {
+  color: #fff;
+  background: linear-gradient(180deg, #ff8d7d, #ee4a4a);
+  box-shadow: 0 9px 24px rgba(160, 30, 30, .38), inset 0 1px 0 rgba(255, 255, 255, .55);
+}
+
 .spacer { flex: 1 1 auto; }
 
 .icon-btn {
@@ -563,6 +589,7 @@ body.touch #pad { display: grid; }
   </div>
 
   <div id="mapTag"></div>
+  <div id="toast"></div>
 
   <div id="pad">
     <button class="dpad" data-d="u" aria-label="上"><svg viewBox="0 0 24 24"><path d="M12 5.2l7 8.6H5z"/></svg></button>
@@ -689,10 +716,10 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   function ri(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 
   /* ---------------- 配置 ---------------- */
-  var MS = 13;                      // 网格边长（所有地图共用同一包围盒 13×13）
+  var MS = 17;                      // 网格边长（所有地图共用同一包围盒 17×17）
   var CELL = 1;
-  var MC = (MS - 1) / 2;            // 6：中心格
-  var WALL = MS * 0.5;              // 6.5：包围盒边缘
+  var MC = (MS - 1) / 2;            // 8：中心格
+  var WALL = MS * 0.5;              // 8.5：包围盒边缘
 
   var DIFFS = {
     easy:   { step: 0.300, min: 0.190 },
@@ -702,8 +729,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   var ACCEL_STEP = 0.0055;
   var MAX_SEG = MS * MS;
 
+  var GOLD_EVERY = 4;               // 每吃这么多口，下一个是金苹果
+  var GOLD_SCORE = 30;
+  var BASE_SCORE = 10;
+  /* 分数到这些值时，地图上会多来一只怪兽（easy 不来） */
+  var REINFORCE_AT = { easy: 0, normal: 90, hard: 60 };
+  /* 开局保护：前几个 tick 内怪兽还在「巡逻」，不会把蛇撞死。
+     孩子刚开局还在找方向，不该被这么冤枉地结束。 */
+  var GUARD_TICKS = 7;
+
   /* =========================================================
-     地图系统：13×13 包围盒内的任意形状
+     地图系统：17×17 包围盒内的任意形状
      cells[z*MS+x] === 1 表示可通行
      ========================================================= */
   function makeCells(fn) {
@@ -809,67 +845,71 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     return { cells: [{ x: cf.x, z: cf.z }], dir: { x: 1, z: 0 } };
   }
 
-  /* ---------- 五张地图 ---------- */
-  var MAZE_WALLS = [
-    [2, 2], [3, 2], [2, 3], [3, 3],
-    [9, 2], [10, 2], [9, 3], [10, 3],
-    [2, 9], [3, 9], [2, 10], [3, 10],
-    [9, 9], [10, 9], [9, 10], [10, 10],
-    [6, 3], [6, 4], [6, 8], [6, 9],
-    [3, 6], [4, 6]
+  /* ---------- 五张地图（全部 17×17 画布，尽量用满） ---------- */
+  /* 迷宫障碍用矩形块描述：[x0, z0, x1, z1] 含边界 */
+  var MAZE_BLOCKS = [
+    /* 四角小房间 3×3 */
+    [2, 2, 4, 4], [12, 2, 14, 4], [2, 12, 4, 14], [12, 12, 14, 14],
+    /* 四根方柱 2×2 */
+    [7, 3, 8, 4], [7, 12, 8, 13], [3, 7, 4, 8], [12, 7, 13, 8],
+    /* 中央两侧短墙，逼出一条窄走廊 */
+    [5, 8, 6, 8], [10, 8, 11, 8]
   ];
+
+  function inMazeBlock(x, z) {
+    for (var i = 0; i < MAZE_BLOCKS.length; i++) {
+      var b = MAZE_BLOCKS[i];
+      if (x >= b[0] && x <= b[2] && z >= b[1] && z <= b[3]) return true;
+    }
+    return false;
+  }
 
   var MAPS = [
     {
       id: 'classic',
       name: '经典方形',
-      note: '无障碍 · 无怪兽',
+      note: '17×17 满格 · 无障碍 · 无怪兽',
       cells: makeCells(function () { return true; }),
-      monsters: 0, monSpd: 0, speedK: 1.00, accelEvery: 4,
+      monsters: 0, extraMon: 0, monSpd: 0, speedK: 1.00, accelEvery: 4,
       monColors: []
     },
     {
       id: 'plus',
       name: '十字广场',
-      note: '双向长廊 · 2 只怪兽',
+      note: '双向长廊 · 3 只怪兽',
       cells: makeCells(function (x, z) {
-        return (z >= MC - 2 && z <= MC + 2) || (x >= MC - 2 && x <= MC + 2);
+        return (z >= MC - 3 && z <= MC + 3) || (x >= MC - 3 && x <= MC + 3);
       }),
-      monsters: 2, monSpd: 2.5, speedK: 1.06, accelEvery: 3,
-      monColors: [0xa06be0, 0x4ec7d8]
+      monsters: 3, extraMon: 1, monSpd: 2.5, speedK: 1.06, accelEvery: 3,
+      monColors: [0xa06be0, 0x4ec7d8, 0xe2745a]
     },
     {
       id: 'diamond',
       name: '菱形花园',
       note: '四角消失 · 3 只怪兽',
       cells: makeCells(function (x, z) {
-        return Math.abs(x - MC) + Math.abs(z - MC) <= 6;
+        return Math.abs(x - MC) + Math.abs(z - MC) <= 8;
       }),
-      monsters: 3, monSpd: 2.4, speedK: 1.10, accelEvery: 3,
+      monsters: 3, extraMon: 0, monSpd: 2.4, speedK: 1.10, accelEvery: 3,
       monColors: [0xa06be0, 0xe2745a, 0x4ec7d8]
     },
     {
       id: 'ring',
       name: '环形赛道',
-      note: '中间留空 · 2 只怪兽',
+      note: '中间留空 · 3 只怪兽',
       cells: makeCells(function (x, z) {
         var dx = Math.abs(x - MC), dz = Math.abs(z - MC);
-        return !(dx <= 2 && dz <= 2);
+        return !(dx <= 3 && dz <= 3);
       }),
-      monsters: 2, monSpd: 2.3, speedK: 1.08, accelEvery: 3,
-      monColors: [0xe2745a, 0xa06be0]
+      monsters: 3, extraMon: 1, monSpd: 2.3, speedK: 1.08, accelEvery: 3,
+      monColors: [0xe2745a, 0xa06be0, 0x4ec7d8]
     },
     {
       id: 'maze',
       name: '糖果迷宫',
       note: '障碍遍布 · 3 只怪兽',
-      cells: makeCells(function (x, z) {
-        for (var i = 0; i < MAZE_WALLS.length; i++) {
-          if (MAZE_WALLS[i][0] === x && MAZE_WALLS[i][1] === z) return false;
-        }
-        return true;
-      }),
-      monsters: 3, monSpd: 2.2, speedK: 1.12, accelEvery: 3,
+      cells: makeCells(function (x, z) { return !inMazeBlock(x, z); }),
+      monsters: 3, extraMon: 1, monSpd: 2.2, speedK: 1.12, accelEvery: 3,
       monColors: [0xa06be0, 0x4ec7d8, 0xe2745a]
     }
   ];
@@ -915,6 +955,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     monT: 0,
     monDur: 1,
     monFreeze: false,
+    reinforced: false,
+    guard: 0,             // 开局保护剩余 tick（>0 时怪兽撞不死蛇）
     time: 0,
     shake: 0,
     dead: 'wall',
@@ -922,7 +964,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   };
 
   var snake = { cells: [], prev: [], dir: { x: 1, z: 0 }, queue: [] };
-  var food = { gx: 0, gz: 0, group: null, type: 'apple' };
+  var food = { gx: 0, gz: 0, group: null, type: 'apple', gold: false };
   var monsters = [];
 
   var errors = [];
@@ -986,6 +1028,20 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       var self = this;
       setTimeout(function () { self.tone(1174.7, 0.13, 'triangle', 0.26); }, 62);
       setTimeout(function () { self.tone(1568, 0.10, 'sine', 0.16); }, 128);
+    },
+    /* 金苹果：更亮更长的上行琶音 */
+    gold: function () {
+      this.tone(880, 0.10, 'triangle', 0.30);
+      var self = this;
+      setTimeout(function () { self.tone(1318.5, 0.10, 'triangle', 0.26); }, 70);
+      setTimeout(function () { self.tone(1760, 0.12, 'triangle', 0.24); }, 140);
+      setTimeout(function () { self.tone(2637, 0.16, 'sine', 0.14); }, 215);
+    },
+    /* 怪兽增援：两声低沉的警告 */
+    warn: function () {
+      this.tone(196, 0.18, 'square', 0.20, 160);
+      var self = this;
+      setTimeout(function () { self.tone(147, 0.26, 'square', 0.18, 108); }, 175);
     },
     turn: function () {
       this.tone(520, 0.05, 'sine', 0.07);
@@ -1055,6 +1111,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     MAT.post   = new THREE.MeshLambertMaterial({ color: 0xffffff });
     MAT.rail   = new THREE.MeshLambertMaterial({ color: 0xff9fc0 });
     MAT.kerb   = new THREE.MeshLambertMaterial({ color: 0x4e9438 });
+    /* 内部障碍格用的实心糖果块：底色留白，颜色由每个实例自己的 instanceColor 决定 */
+    MAT.block  = new THREE.MeshLambertMaterial({ color: 0xffffff });
     MAT.trunk  = new THREE.MeshLambertMaterial({ color: 0x8b5a34 });
     MAT.crown  = new THREE.MeshLambertMaterial({ color: 0x3f9e46 });
     MAT.cloud  = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x9fbfd8, emissiveIntensity: 0.18 });
@@ -1073,6 +1131,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     MAT.donut  = new THREE.MeshPhongMaterial({ color: 0xff9dc4, shininess: 40 });
     MAT.icing  = new THREE.MeshPhongMaterial({ color: 0xffe1ee, shininess: 70 });
     MAT.cherry = new THREE.MeshPhongMaterial({ color: 0xe0304f, shininess: 80, specular: 0x661122 });
+    /* 金苹果：整颗换成金属金，一眼就能认出来 */
+    MAT.gold   = new THREE.MeshPhongMaterial({
+      color: 0xffc21c, shininess: 120, specular: 0xfff3bf,
+      emissive: 0x8a5200, emissiveIntensity: 0.55
+    });
 
     MAT.glow = new THREE.MeshBasicMaterial({
       color: 0xfff8c8, transparent: true, opacity: 0.10,
@@ -1250,6 +1313,62 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     var x, z, i;
     var d = new THREE.Object3D();
 
+    /* ---------- 0. 把「不可通行格」分成两类 ----------
+       A 形状外部：从 17×17 边框上的不可通行格出发能走到的那些 → 属于场地的外轮廓，用围栏收边
+       B 内部障碍：被可通行格完全围住、从外面走不到的那些 → 立起实心糖果块，一眼看出「过不去」
+       只有分开处理，孩子才不会把「围起来的小院」误当成能走的路。 */
+    var outside = new Uint8Array(MS * MS);
+    var bfs = [];
+    for (z = 0; z < MS; z++) {
+      for (x = 0; x < MS; x++) {
+        var onRim = (x === 0 || z === 0 || x === MS - 1 || z === MS - 1);
+        if (onRim && !cellFree(cells, x, z)) { outside[z * MS + x] = 1; bfs.push(z * MS + x); }
+      }
+    }
+    for (var bi = 0; bi < bfs.length; bi++) {
+      var cur = bfs[bi], bx = cur % MS, bz = (cur - bx) / MS;
+      for (i = 0; i < 4; i++) {
+        var nx = bx + DIR4[i].x, nz = bz + DIR4[i].z;
+        if (nx < 0 || nz < 0 || nx >= MS || nz >= MS) continue;
+        var idxN = nz * MS + nx;
+        if (outside[idxN] || cellFree(cells, nx, nz)) continue;
+        outside[idxN] = 1;
+        bfs.push(idxN);
+      }
+    }
+
+    /* 内部障碍格 + 连通分量编号（同一个块用同一种颜色，看起来才像一整块） */
+    var innerIdx = [];
+    var compId = new Int16Array(MS * MS);
+    for (i = 0; i < compId.length; i++) compId[i] = -1;
+    var nComp = 0;
+    for (z = 0; z < MS; z++) {
+      for (x = 0; x < MS; x++) {
+        if (cellFree(cells, x, z) || outside[z * MS + x] || compId[z * MS + x] >= 0) continue;
+        var head = z * MS + x;
+        compId[head] = nComp;
+        bfs.length = 0; bfs.push(head);
+        for (var ci = 0; ci < bfs.length; ci++) {
+          var c0 = bfs[ci], c0x = c0 % MS, c0z = (c0 - c0x) / MS;
+          innerIdx.push({ x: c0x, z: c0z, c: nComp });
+          for (i = 0; i < 4; i++) {
+            var mx = c0x + DIR4[i].x, mz = c0z + DIR4[i].z;
+            if (mx < 0 || mz < 0 || mx >= MS || mz >= MS) continue;
+            var mi = mz * MS + mx;
+            if (compId[mi] >= 0 || outside[mi] || cellFree(cells, mx, mz)) continue;
+            compId[mi] = nComp;
+            bfs.push(mi);
+          }
+        }
+        nComp++;
+      }
+    }
+    var isInnerWall = function (wx, wz) {
+      if (wx < 0 || wz < 0 || wx >= MS || wz >= MS) return false;
+      if (cellFree(cells, wx, wz)) return false;
+      return !outside[wz * MS + wx];
+    };
+
     /* ---------- 1. 台面：可通行格各自一块厚板，拼出形状 ---------- */
     var slabGeo = new THREE.BoxGeometry(CELL * 1.004, 0.54, CELL * 1.004);
     var nFree = 0;
@@ -1284,7 +1403,34 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     board.name = 'board';
     arenaGroup.add(board);
 
-    /* ---------- 3. 找出真正的形状边界：可通行格 → 墙格 的交界 ---------- */
+    /* ---------- 2.5 内部障碍：立起实心糖果块 ---------- */
+    if (innerIdx.length) {
+      var blockGeo = new THREE.BoxGeometry(CELL * 0.96, 0.64, CELL * 0.96);
+      var blocks = new THREE.InstancedMesh(blockGeo, MAT.block, innerIdx.length);
+      blocks.castShadow = true;
+      blocks.receiveShadow = true;
+      blocks.frustumCulled = false;
+      blocks.name = 'blocks';
+      var palette = [0xff9ab8, 0xffc978, 0xa8d8ff, 0xc3a6ff, 0x8fe0c0, 0xffb0d8];
+      var base = new THREE.Color(), tmpc = new THREE.Color();
+      for (i = 0; i < innerIdx.length; i++) {
+        var ic = innerIdx[i];
+        d.position.set(gx2w(ic.x), 0.32, gx2w(ic.z));
+        d.rotation.set(0, 0, 0);
+        d.scale.set(1, 1, 1);
+        d.updateMatrix();
+        blocks.setMatrixAt(i, d.matrix);
+        /* 同一个连通块同色；相邻格轻微深浅交替，看得出是一格一格拼的 */
+        base.setHex(palette[ic.c % palette.length]);
+        var shade = ((ic.x + ic.z) & 1) ? 1.0 : 0.94;
+        tmpc.setRGB(base.r * shade, base.g * shade, base.b * shade);
+        blocks.setColorAt(i, tmpc);
+      }
+      blocks.instanceColor.needsUpdate = true;
+      arenaGroup.add(blocks);
+    }
+
+    /* ---------- 3. 找出真正的外轮廓：可通行格 → 形状外部 的交界 ---------- */
     var edges = [];          /* 每条边界边：位置中点 + 外法线 */
     for (z = 0; z < MS; z++) {
       for (x = 0; x < MS; x++) {
@@ -1292,6 +1438,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         for (i = 0; i < 4; i++) {
           var nrm = DIR4[i];
           if (cellFree(cells, x + nrm.x, z + nrm.z)) continue;
+          if (isInnerWall(x + nrm.x, z + nrm.z)) continue;   /* 内部障碍由糖果块自己表达，不再插围栏 */
           edges.push({
             px: gx2w(x) + nrm.x * CELL * 0.5,
             pz: gx2w(z) + nrm.z * CELL * 0.5,
@@ -1343,7 +1490,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       arenaGroup.add(posts); arenaGroup.add(balls); arenaGroup.add(rails);
     }
 
-    return { edges: nE, free: nFree };
+    return { edges: nE, free: nFree, blocks: innerIdx.length };
   }
 
   function buildWorld() {
@@ -1373,7 +1520,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   /* 圆滚滚的果冻树 */
   function buildTrees() {
-    var N = 14;
+    var N = 16;
     var trunkGeo = new THREE.CylinderGeometry(0.19, 0.27, 1.0, 8);
     var crownGeo = new THREE.SphereGeometry(1, 16, 12);
     var trunks = new THREE.InstancedMesh(trunkGeo, MAT.trunk, N);
@@ -1383,13 +1530,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     var d = new THREE.Object3D();
     var c = new THREE.Color();
 
+    /* 相机距离随地图大小变化，树的环半径也跟着走 */
+    var camR = Math.sqrt(baseCam.x * baseCam.x + baseCam.z * baseCam.z);
+    var near = WALL + 4.0;
+    var far = WALL + 15.0;
+
     for (var i = 0; i < N; i++) {
       /* 环绕场地散布，避开相机脚下 */
       var ang = (i / N) * TAU + rand(-0.30, 0.30);
-      var rad = rand(12.5, 22.5);
+      var rad = rand(near, far);
       var x = Math.cos(ang) * rad, z = Math.sin(ang) * rad;
       var cdx = x - baseCam.x, cdz = z - baseCam.z;
-      if (Math.sqrt(cdx * cdx + cdz * cdz) < 11.5) { rad += 13; x = Math.cos(ang) * rad; z = Math.sin(ang) * rad; }
+      if (Math.sqrt(cdx * cdx + cdz * cdz) < camR * 0.80) {
+        rad += 12;
+        x = Math.cos(ang) * rad; z = Math.sin(ang) * rad;
+      }
       var s = rand(0.85, 1.45);
 
       /* 树干（矮而粗，被画面边缘裁到时不会只剩一根柱子） */
@@ -1503,7 +1658,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     g.add(wl); g.add(wr); g.add(body);
     g.userData = {
       wl: wl, wr: wr,
-      r: rand(8.6, 12.5), a: rand(0, TAU), sp: rand(0.22, 0.44), y: rand(4.2, 6.4)
+      r: rand(WALL + 2.0, WALL + 7.5), a: rand(0, TAU), sp: rand(0.22, 0.44), y: rand(4.6, 7.2)
     };
     scene.add(g);
     decor.butterflies.push(g);
@@ -1801,8 +1956,21 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     }
     food.type = FOOD_TYPES[ri(0, FOOD_TYPES.length - 1)];
     var g = buildFoodMesh(food.type);
+
+    if (food.gold) {
+      /* 整颗镀金，并且放大一圈 */
+      g.traverse(function (o) {
+        if (!o.isMesh) return;
+        if (o.material === MAT.glow || o.material === MAT.ring ||
+            o.material === MAT.disc || o.material === MAT.gold) return;
+        o.material = MAT.gold;
+      });
+      g.scale.setScalar(1.42);
+    } else {
+      g.scale.setScalar(1.14);
+    }
+
     g.position.set(gx2w(food.gx), 0.06, gx2w(food.gz));
-    g.scale.setScalar(1.14);
     scene.add(g);
     food.group = g;
   }
@@ -1828,6 +1996,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     var c = free[Math.floor(Math.random() * free.length)];
     food.gx = c.x;
     food.gz = c.z;
+    /* 每 GOLD_EVERY 口之后的那个是金苹果 */
+    food.gold = ((G.eaten + 1) % GOLD_EVERY === 0);
     buildFood();
   }
 
@@ -2003,44 +2173,72 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     return list[Math.floor(Math.random() * list.length)];
   }
 
+  function ensureMonsterRoot() {
+    ensureMonsterAssets();
+    if (!monsterRoot) {
+      monsterRoot = new THREE.Group();
+      monsterRoot.name = 'monsters';
+      scene.add(monsterRoot);
+    }
+  }
+
+  /* 造一只怪兽放到场上（开局布阵与中途增援共用） */
+  function spawnOneMonster() {
+    ensureMonsterRoot();
+    /* 出生点离蛇头远一点：地图放大了，起手不该有怪兽杵在正前方跑道上 */
+    var minD = Math.max(5, Math.round(MS * 0.4));
+    var sp = findMonsterSpawn(minD, 4) || findMonsterSpawn(4, 2) || findMonsterSpawn(1, 0);
+    if (!sp) return false;
+
+    var i = monsters.length;
+    var color = G.map.monColors[i % G.map.monColors.length];
+    var grp = buildMonsterMesh(color);
+    monsterRoot.add(grp);
+
+    /* 初始朝向：优先选一个能往前走的反向 */
+    var dir = null;
+    for (var k = 0; k < 4; k++) {
+      var d4 = DIR4[(i + k) % 4];
+      if (cellFree(G.cells, sp.x + d4.x, sp.z + d4.z)) { dir = { x: d4.x, z: d4.z }; break; }
+    }
+    if (!dir) dir = { x: 1, z: 0 };
+
+    monsters.push({
+      gx: sp.x, gz: sp.z,
+      px: sp.x, pz: sp.z,
+      wx: gx2w(sp.x), wz: gx2w(sp.z),
+      dir: dir, yaw: Math.atan2(dir.x, dir.z),
+      t: 0, dur: Math.max(0.12, G.monDur),
+      seed: rand(0, TAU),
+      group: grp, color: color
+    });
+    return true;
+  }
+
   function spawnMonsters() {
     disposeMonsters();
     if (!G.map || !G.map.monsters) return;
     ensureMonsterAssets();
-
-    monsterRoot = new THREE.Group();
-    monsterRoot.name = 'monsters';
-    scene.add(monsterRoot);
-
     for (var i = 0; i < G.map.monsters; i++) {
-      var sp = findMonsterSpawn(5, 4);
-      if (!sp) sp = findMonsterSpawn(3, 2);
-      if (!sp) sp = findMonsterSpawn(1, 0);
-      if (!sp) break;
-
-      var color = G.map.monColors[i % G.map.monColors.length];
-      var grp = buildMonsterMesh(color);
-      monsterRoot.add(grp);
-
-      /* 初始朝向：优先选一个能来回走的方向 */
-      var dir = null;
-      for (var k = 0; k < 4; k++) {
-        var d4 = DIR4[(i + k) % 4];
-        if (cellFree(G.cells, sp.x + d4.x, sp.z + d4.z)) { dir = { x: d4.x, z: d4.z }; break; }
-      }
-      if (!dir) dir = { x: 1, z: 0 };
-
-      monsters.push({
-        gx: sp.x, gz: sp.z,
-        px: sp.x, pz: sp.z,
-        wx: gx2w(sp.x), wz: gx2w(sp.z),
-        dir: dir, yaw: Math.atan2(dir.x, dir.z),
-        t: 0, dur: Math.max(0.12, G.monDur),
-        seed: rand(0, TAU),
-        group: grp, color: color
-      });
+      if (!spawnOneMonster()) break;
     }
     updateMonsterTransforms();
+  }
+
+  /* 分数到线了，就多来一只怪兽（一张图最多多一只） */
+  function maybeReinforce() {
+    if (!G.map || !G.map.monsters) return;
+    if (G.reinforced) return;
+    var at = REINFORCE_AT[G.diff] || 0;
+    if (!at || G.score < at) return;
+    var cap = G.map.monsters + (G.map.extraMon || 0);
+    if (monsters.length >= cap) return;
+    if (!spawnOneMonster()) return;
+    G.reinforced = true;
+    updateMonsterTransforms();
+    updateMapTag();
+    toast('又来了一只小怪兽！', 'warn');
+    Snd.warn();
   }
 
   function monsterStep(m) {
@@ -2127,6 +2325,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
   /* 蛇头与怪兽的距离判定（用插值位置，过门口相遇也算撞上） */
   function checkMonsterHit() {
     if (G.state !== 'playing' || !monsters.length) return;
+    if (G.guard > 0) return;
     var h = segPos[0] || { x: gx2w(snake.cells[0].x), z: gx2w(snake.cells[0].z) };
     for (var i = 0; i < monsters.length; i++) {
       var m = monsters[i];
@@ -2166,6 +2365,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     G.tMix = 1;
     G.shake = 0;
     G.dead = 'wall';
+    G.reinforced = false;
+    G.guard = GUARD_TICKS;
 
     /* 怪兽节奏跟着难度走：简单档更慢，孩子来得及躲 */
     var k = clamp(G.stepDur / DIFFS.normal.step, 0.80, 1.35);
@@ -2223,9 +2424,11 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     if (!cellFree(G.cells, nx, nz)) { die('wall'); return false; }
 
-    /* 一头撞进怪兽所在的格子 */
-    for (var q = 0; q < monsters.length; q++) {
-      if (monsters[q].gx === nx && monsters[q].gz === nz) { die('monster'); return false; }
+    /* 一头撞进怪兽所在的格子（开局保护期内不算） */
+    if (G.guard <= 0) {
+      for (var q = 0; q < monsters.length; q++) {
+        if (monsters[q].gx === nx && monsters[q].gz === nz) { die('monster'); return false; }
+      }
     }
 
     var willGrow = (nx === food.gx && nz === food.gz);
@@ -2241,11 +2444,13 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     } else {
       onEat();
     }
+    if (G.guard > 0) G.guard--;
     return true;
   }
 
   function onEat() {
-    G.score += 10;
+    var wasGold = food.gold;
+    G.score += wasGold ? GOLD_SCORE : BASE_SCORE;
     G.eaten++;
 
     if (G.eaten % (G.map.accelEvery || 4) === 0) {
@@ -2254,10 +2459,17 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
     var h = snake.cells[0];
     var px = gx2w(h.x), pz = gx2w(h.z);
-    spawnBurst(px, 1.0, pz, 0xffd93d, 13);
-    spawnBurst(px, 0.85, pz, 0xffffff, 6);
+    if (wasGold) {
+      spawnBurst(px, 1.0, pz, 0xffd23f, 20);
+      spawnBurst(px, 0.9, pz, 0xfff6cc, 10);
+      toast('金苹果  +' + GOLD_SCORE, 'gold');
+      Snd.gold();
+    } else {
+      spawnBurst(px, 1.0, pz, 0xffd93d, 13);
+      spawnBurst(px, 0.85, pz, 0xffffff, 6);
+      Snd.eat();
+    }
     headPulse = 1;
-    Snd.eat();
     updateHud();
     bumpScore();
 
@@ -2266,6 +2478,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       G.best = G.score;
       saveBest();
     }
+
+    maybeReinforce();
   }
 
   function die(type) {
@@ -2422,6 +2636,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     el.maps = document.getElementById('maps');
     el.mapNote = document.getElementById('mapNote');
     el.mapTag = document.getElementById('mapTag');
+    el.toast = document.getElementById('toast');
   }
 
   function updateHud() {
@@ -2431,7 +2646,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
 
   function updateMapTag() {
     if (!el.mapTag) return;
-    el.mapTag.textContent = G.map.name + (G.map.monsters ? ' · ' + G.map.monsters + ' 怪兽' : ' · 无怪兽');
+    var n = Math.max(monsters.length, G.map.monsters);
+    el.mapTag.textContent = G.map.name + (n ? ' · ' + n + ' 怪兽' : ' · 无怪兽');
   }
 
   /* 用可通行表直接画一张迷你形状图，保证和真实场地完全一致 */
@@ -2489,6 +2705,19 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     el.chipScore.classList.remove('bump');
     void el.chipScore.offsetWidth;
     el.chipScore.classList.add('bump');
+  }
+
+  /* 屏幕中间的短提示：金苹果、怪兽增援 */
+  var toastTimer = null;
+  function toast(text, kind) {
+    var t = el.toast;
+    if (!t) return;
+    t.textContent = text;
+    t.className = 't-' + (kind || 'info');
+    void t.offsetWidth;
+    t.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 1600);
   }
 
   function flash() {
@@ -2722,12 +2951,12 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     scene.add(new THREE.AmbientLight(0xffffff, 0.26));
 
     sunLight = new THREE.DirectionalLight(0xfff8e8, 1.95);
-    sunLight.position.set(11, 21, 13);
+    sunLight.position.set(14, 24, 16);
     sunLight.castShadow = true;
     sunLight.shadow.mapSize.set(2048, 2048);
     var sc = sunLight.shadow.camera;
-    sc.left = -11; sc.right = 11; sc.top = 11; sc.bottom = -11;
-    sc.near = 2; sc.far = 60;
+    sc.left = -16; sc.right = 16; sc.top = 16; sc.bottom = -16;
+    sc.near = 2; sc.far = 78;
     sunLight.shadow.bias = -0.0004;
     sunLight.shadow.normalBias = 0.006;
     scene.add(sunLight);
@@ -2791,6 +3020,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     get head() { return { x: snake.cells[0].x, z: snake.cells[0].z }; },
     get dir() { return { x: snake.dir.x, z: snake.dir.z }; },
     get foodCell() { return { gx: food.gx, gz: food.gz }; },
+    get foodGold() { return !!food.gold; },
+    get foodScale() { return food.group ? +food.group.scale.x.toFixed(3) : 0; },
+    get reinforced() { return G.reinforced; },
     get stepDur() { return G.stepDur; },
     get tMix() { return G.tMix; },
     get mapId() { return G.mapId; },
@@ -2806,7 +3038,7 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     mapInfo: function () {
       return {
         id: G.mapId, name: G.map.name, monsters: G.map.monsters,
-        free: G.map.freeCount, total: MS * MS,
+        ms: MS, free: G.map.freeCount, total: MS * MS,
         cells: Array.prototype.slice.call(G.cells)
       };
     },
@@ -2827,6 +3059,8 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
       G.monFreeze = v !== false;
       return G.monFreeze;
     },
+    /* 提前结束开局保护（测试"蛇真的会撞死"时用） */
+    clearGuard: function () { G.guard = 0; return G.guard; },
     /* 把第 i 只怪兽直接摆到某格（测试碰撞用） */
     putMonster: function (i, x, z) {
       var m = monsters[i];
@@ -2891,10 +3125,14 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
         len: snake.cells.length,
         head: { x: snake.cells[0].x, z: snake.cells[0].z },
         dir: { x: snake.dir.x, z: snake.dir.z },
-        food: { gx: food.gx, gz: food.gz },
+        food: { gx: food.gx, gz: food.gz, gold: !!food.gold },
         stepDur: +G.stepDur.toFixed(4),
         minDur: +G.minDur.toFixed(4),
         monsters: monsters.length,
+        reinforced: G.reinforced,
+        reinforceAt: REINFORCE_AT[G.diff] || 0,
+        guard: G.guard,
+        guardTicks: GUARD_TICKS,
         monsterPos: monsters.map(function (m) { return { x: m.gx, z: m.gz }; }),
         cam: {
           x: +camera.position.x.toFixed(2),
@@ -2941,6 +3179,9 @@ function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"f
     },
     step: function () { return G.state === 'playing' ? stepOnce() : false; },
     setStepDur: function (v) { G.stepDur = v; return G.stepDur; },
+    setScore: function (v) { G.score = v; updateHud(); return G.score; },
+    /* 让下一颗食物变成金苹果 / 恢复普通（测试用） */
+    setFoodGold: function (v) { food.gold = !!v; buildFood(); return food.gold; },
     audio: function () {
       return { ctx: Snd.ctx ? Snd.ctx.state : null, ok: Snd.ok, music: !!Snd.timer, on: G.soundOn };
     },

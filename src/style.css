@@ -319,6 +319,32 @@ body {
   white-space: nowrap;
 }
 
+/* 屏幕中央的短提示（金苹果 / 怪兽增援） */
+#toast {
+  position: absolute;
+  left: 50%;
+  top: 32%;
+  transform: translate(-50%, 6px) scale(.72);
+  padding: 8px 20px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: .5px;
+  color: #7a4a00;
+  background: linear-gradient(180deg, #fff3bb, #ffcf3d);
+  box-shadow: 0 9px 24px rgba(120, 70, 0, .30), inset 0 1px 0 #fff;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  transition: opacity .16s, transform .30s cubic-bezier(.2, 1.6, .4, 1);
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+#toast.t-warn {
+  color: #fff;
+  background: linear-gradient(180deg, #ff8d7d, #ee4a4a);
+  box-shadow: 0 9px 24px rgba(160, 30, 30, .38), inset 0 1px 0 rgba(255, 255, 255, .55);
+}
+
 .spacer { flex: 1 1 auto; }
 
 .icon-btn {
