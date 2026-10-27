@@ -64,6 +64,11 @@ __CSS__
   <!-- 小地图：场地变大以后，苹果和怪兽经常会跑出视野 -->
   <canvas id="mini" aria-label="小地图"></canvas>
 
+  <!-- 食物在视野外时的方向指引（否则整屏空草地，孩子不知道往哪走） -->
+  <div id="foodArrow" aria-hidden="true">
+    <svg viewBox="0 0 24 24"><path d="M12 3.8l7.6 9.6h-4.3v6.6H8.7v-6.6H4.4z"/></svg>
+  </div>
+
   <div id="pad">
     <button class="dpad" data-d="u" aria-label="上"><svg viewBox="0 0 24 24"><path d="M12 5.2l7 8.6H5z"/></svg></button>
     <button class="dpad" data-d="l" aria-label="左"><svg viewBox="0 0 24 24"><path d="M5.2 12l8.6-7v14z"/></svg></button>

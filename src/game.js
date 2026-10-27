@@ -1285,10 +1285,36 @@
     food.group = g;
   }
 
-  /* 食物生成半径（格）。地图放大后如果还满场随机撒，苹果经常落在视野外，
-     孩子会以为「场上没有苹果」而原地打转。所以按由近到远的档次找位置：
-     多数时候就在眼前几格，偶尔远一点留点探索感。 */
-  var FOOD_TIERS = [6, 8, 10, 13, 17, 22];
+  /* 食物生成：按「环带」抽距离 + 强制远离最近出现过的位置。
+     教训：上一版用 pow(rand,2.2) 把距离压得太偏近（44% 落在蛇头 6 格内），
+     蛇头一直在动，苹果就永远追在屁股后面，看起来像「总在同一个地方、没有随机」。
+     现在两个措施：
+     1) 环带（annulus）而不是圆盘 —— 每个距离段内的落点真的落在该段，不会层层叠加偏近；
+     2) 排斥最近 FOOD_HIST_N 个食物 —— 同一个角落绝不会连续刷。 */
+  var FOOD_BANDS = [
+    [3, 7], [5, 10], [8, 14], [11, 18], [14, 24]
+  ];
+  var FOOD_BAND_W = [0.16, 0.24, 0.26, 0.19, 0.15];
+  var FOOD_HIST_N = 6;
+  var FOOD_AVOID = [7, 5, 3];   // 排斥半径，逐个放宽，最后不限
+  var foodHist = [];
+
+  function pickBand() {
+    var r = Math.random(), acc = 0;
+    for (var i = 0; i < FOOD_BAND_W.length; i++) {
+      acc += FOOD_BAND_W[i];
+      if (r <= acc) return i;
+    }
+    return FOOD_BAND_W.length - 1;
+  }
+
+  function farFromHist(x, z, rad) {
+    for (var i = 0; i < foodHist.length; i++) {
+      var h = foodHist[i];
+      if (Math.abs(x - h.x) + Math.abs(z - h.z) < rad) return false;
+    }
+    return true;
+  }
 
   function placeFood() {
     var occ = {};
@@ -1300,31 +1326,53 @@
       occ[cellKey(monsters[m].gx, monsters[m].gz)] = 1;
     }
     var head = snake.cells[0] || { x: MC, z: MC };
-
-    /* 偏向前面的档次：pow(1.7) 让近处权重远大于远处 */
-    var pick = Math.min(FOOD_TIERS.length - 1,
-      Math.floor(Math.pow(Math.random(), 2.2) * FOOD_TIERS.length));
+    var b0 = pickBand();
 
     var chosen = null;
-    for (var t = pick; t < FOOD_TIERS.length && !chosen; t++) {
-      var R = FOOD_TIERS[t];
-      var list = [];
-      for (var z = 0; z < MS; z++) {
-        for (var x = 0; x < MS; x++) {
-          if (!cellFree(G.cells, x, z)) continue;
-          if (occ[cellKey(x, z)]) continue;
-          if (Math.abs(x - head.x) + Math.abs(z - head.z) > R) continue;
-          list.push({ x: x, z: z });
+    /* 外层：排斥半径从紧到松（最后一轮不排斥）；内层：从抽中的环带向外轮转。
+       这样既能保证「离上次远」，又不会因为窄地形某个环带全空而卡死。 */
+    for (var pass = 0; pass <= FOOD_AVOID.length && !chosen; pass++) {
+      var rad = pass < FOOD_AVOID.length ? FOOD_AVOID[pass] : 0;
+      for (var k = 0; k < FOOD_BANDS.length && !chosen; k++) {
+        var band = FOOD_BANDS[(b0 + k) % FOOD_BANDS.length];
+        var lo = band[0], hi = band[1];
+        var list = [];
+        for (var z = 0; z < MS; z++) {
+          for (var x = 0; x < MS; x++) {
+            if (!cellFree(G.cells, x, z)) continue;
+            if (occ[cellKey(x, z)]) continue;
+            var d = Math.abs(x - head.x) + Math.abs(z - head.z);
+            if (d < lo || d > hi) continue;
+            if (rad && !farFromHist(x, z, rad)) continue;
+            list.push({ x: x, z: z });
+          }
+        }
+        if (list.length) chosen = list[(Math.random() * list.length) | 0];
+      }
+    }
+
+    /* 兜底：蛇长得几乎铺满、所有环带都挑不出来时，全图任选一个空格 */
+    if (!chosen) {
+      var all = [];
+      for (var z2 = 0; z2 < MS; z2++) {
+        for (var x2 = 0; x2 < MS; x2++) {
+          if (!cellFree(G.cells, x2, z2)) continue;
+          if (occ[cellKey(x2, z2)]) continue;
+          all.push({ x: x2, z: z2 });
         }
       }
-      if (list.length) chosen = list[Math.floor(Math.random() * list.length)];
+      if (!all.length) return;
+      chosen = all[(Math.random() * all.length) | 0];
     }
-    if (!chosen) return;
 
     food.gx = chosen.x;
     food.gz = chosen.z;
     /* 每 GOLD_EVERY 口之后的那个是金苹果 */
     food.gold = ((G.eaten + 1) % GOLD_EVERY === 0);
+
+    foodHist.push({ x: chosen.x, z: chosen.z });
+    if (foodHist.length > FOOD_HIST_N) foodHist.shift();
+
     buildFood();
   }
 
@@ -1700,6 +1748,7 @@
     G.monDur = G.map.monsters ? (1 / G.map.monSpd) * k : 1;
 
     spawnMonsters();
+    foodHist.length = 0;   // 新的一局，不带着上一局的食物历史做排斥
     placeFood();
     updateHud();
     updateMapTag();
@@ -1852,6 +1901,7 @@
     updateCamera(dt, G.time);
     updateDecor(dt);
     if (G.state !== 'menu') { mini.t += dt; drawMini(); }
+    updateFoodArrow();
   }
 
   function updateCamera(dt, time) {
@@ -1977,13 +2027,20 @@
       var c = snake.cells[i];
       g.fillRect(pad + c.x * k, pad + c.z * k, r, r);
     }
-    /* 食物：白点 + 红/金描边 */
+    /* 食物：白点 + 红/金描边 + 呼吸光晕（食物可能落到 20 多格外，得让它一眼就跳出来） */
     if (food.gx !== undefined) {
+      var fx = pad + (food.gx + 0.5) * k;
+      var fz = pad + (food.gz + 0.5) * k;
+      var pulse = 0.86 + 0.28 * Math.sin(G.time * 4.2);
       g.beginPath();
-      g.arc(pad + (food.gx + 0.5) * k, pad + (food.gz + 0.5) * k, Math.max(2.6, k * 1.05), 0, TAU);
+      g.arc(fx, fz, Math.max(4.6, k * 2.0) * pulse, 0, TAU);
+      g.fillStyle = food.gold ? 'rgba(255,183,3,.34)' : 'rgba(232,69,63,.28)';
+      g.fill();
+      g.beginPath();
+      g.arc(fx, fz, Math.max(3.0, k * 1.2), 0, TAU);
       g.fillStyle = '#ffffff';
       g.fill();
-      g.lineWidth = Math.max(1, k * 0.45);
+      g.lineWidth = Math.max(1.1, k * 0.48);
       g.strokeStyle = food.gold ? '#ffb703' : '#e8453f';
       g.stroke();
     }
@@ -2006,6 +2063,41 @@
       g.strokeStyle = '#1d7a3f';
       g.stroke();
     }
+  }
+
+  /* 食物落到视野外时，在屏幕上给一个指向箭头。
+     食物位置随机散开后，经常落在横向视野之外（相机竖屏只显示约 19 列），
+     没有指引孩子只会看到一片空草地。 */
+  var _fproj = new THREE.Vector3();
+  var arrowOn = false;
+  function updateFoodArrow() {
+    var a = el.foodArrow;
+    if (!a) return;
+    var hide = G.state === 'menu' || G.state === 'over' || food.gx === undefined;
+    if (!hide) {
+      var w = window.innerWidth, h = window.innerHeight;
+      _fproj.set(gx2w(food.gx), 0.25, gx2w(food.gz)).project(camera);
+      var behind = _fproj.z > 1;
+      var ndx = behind ? -_fproj.x : _fproj.x;
+      var ndy = behind ? -_fproj.y : _fproj.y;
+      /* 留出一点边距：贴近屏幕边缘时也算「看不见」，免得箭头和食物一起闪烁 */
+      var off = Math.abs(ndx) > 0.88 || Math.abs(ndy) > 0.84;
+      if (off) {
+        var dx = ndx, dy = -ndy;
+        var len = Math.sqrt(dx * dx + dy * dy) || 1;
+        dx /= len; dy /= len;
+        var R = Math.min(w, h) * 0.30;
+        var x = w / 2 + dx * R, y = h / 2 + dy * R;
+        var deg = Math.atan2(dy, dx) * 180 / Math.PI + 90;  /* svg 箭头默认朝上 */
+        var half = a.offsetWidth ? a.offsetWidth / 2 : 19;
+        a.style.transform = 'translate(' + (x - half).toFixed(1) + 'px,' +
+          (y - half).toFixed(1) + 'px) rotate(' + deg.toFixed(1) + 'deg)';
+        a.classList.toggle('gold', !!food.gold);
+        if (!arrowOn) { a.classList.add('show'); arrowOn = true; }
+        return;
+      }
+    }
+    if (arrowOn) { a.classList.remove('show'); arrowOn = false; }
   }
 
   function updateDecor(dt) {
@@ -2152,6 +2244,7 @@
     el.icoOff = document.getElementById('icoSoundOff');
     el.maps = document.getElementById('maps');
     el.mini = document.getElementById('mini');
+    el.foodArrow = document.getElementById('foodArrow');
     el.mapNote = document.getElementById('mapNote');
     el.mapTag = document.getElementById('mapTag');
     el.toast = document.getElementById('toast');
@@ -2709,6 +2802,10 @@
       food.gx = x; food.gz = z; buildFood();
       return { gx: food.gx, gz: food.gz };
     },
+    /* 重新抽一颗食物（测试用：连续调用即可采样分布） */
+    regenFood: function () { placeFood(); return { gx: food.gx, gz: food.gz }; },
+    foodHistory: function () { return foodHist.slice(); },
+    resetFoodHistory: function () { foodHist.length = 0; return foodHist.length; },
     setCells: function (arr, dx, dz) {
       snake.cells = arr.map(function (c) { return { x: c[0], z: c[1] }; });
       snake.prev = snake.cells.map(function (c) { return { x: c.x, z: c.z }; });
