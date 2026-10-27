@@ -13,10 +13,15 @@
   function ri(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 
   /* ---------------- 配置 ---------------- */
-  var MS = 17;                      // 网格边长（所有地图共用同一包围盒 17×17）
+  var MS = 35;                      // 网格边长（所有地图共用同一包围盒 35×35 = 1225 格）
   var CELL = 1;
-  var MC = (MS - 1) / 2;            // 8：中心格
-  var WALL = MS * 0.5;              // 8.5：包围盒边缘
+  var MC = (MS - 1) / 2;            // 17：中心格
+  var WALL = MS * 0.5;              // 17.5：包围盒边缘
+
+  /* 相机：场地变大时不是把画面越缩越远，而是视野跟着蛇头走、格子始终看得清 */
+  var TARGET_CELL_PX = 19;          // 一个格子希望占多少屏幕像素
+  var VIEW_MIN = 13, VIEW_MAX = 37; // 画面窄边最少 / 最多能看到多少格（屏幕够大时正好装下整张地图）
+  var CAM_ELEV = 46 * DEG;          // 俯角
 
   var DIFFS = {
     easy:   { step: 0.300, min: 0.190 },
@@ -142,15 +147,21 @@
     return { cells: [{ x: cf.x, z: cf.z }], dir: { x: 1, z: 0 } };
   }
 
-  /* ---------- 五张地图（全部 17×17 画布，尽量用满） ---------- */
-  /* 迷宫障碍用矩形块描述：[x0, z0, x1, z1] 含边界 */
+  /* ---------- 五张地图（全部 35×35 画布，尽量用满） ---------- */
+  /* 迷宫障碍用矩形块描述：[x0, z0, x1, z1] 含边界
+     设计原则：墙都是 1~2 格厚、通道至少 2 格宽，孩子转弯不会卡住；中央留一个四门房间做地标 */
   var MAZE_BLOCKS = [
-    /* 四角小房间 3×3 */
-    [2, 2, 4, 4], [12, 2, 14, 4], [2, 12, 4, 14], [12, 12, 14, 14],
-    /* 四根方柱 2×2 */
-    [7, 3, 8, 4], [7, 12, 8, 13], [3, 7, 4, 8], [12, 7, 13, 8],
-    /* 中央两侧短墙，逼出一条窄走廊 */
-    [5, 8, 6, 8], [10, 8, 11, 8]
+    /* 四角房间 5×5 */
+    [2, 2, 6, 6], [28, 2, 32, 6], [2, 28, 6, 32], [28, 28, 32, 32],
+    /* 四边中段的长墙（靠内一格，留出外圈跑道） */
+    [14, 1, 20, 2], [14, 32, 20, 33], [1, 14, 2, 20], [32, 14, 33, 20],
+    /* 中央房间：上下左右各两段墙，中间留一个门洞 */
+    [11, 11, 16, 11], [18, 11, 23, 11],
+    [11, 23, 16, 23], [18, 23, 23, 23],
+    [11, 12, 11, 16], [11, 18, 11, 22],
+    [23, 12, 23, 16], [23, 18, 23, 22],
+    /* 四条放射短柱 */
+    [8, 17, 9, 17], [25, 17, 26, 17], [17, 8, 17, 9], [17, 25, 17, 26]
   ];
 
   function inMazeBlock(x, z) {
@@ -165,7 +176,7 @@
     {
       id: 'classic',
       name: '经典方形',
-      note: '17×17 满格 · 无障碍 · 无怪兽',
+      note: '35×35 满格 · 无障碍 · 无怪兽',
       cells: makeCells(function () { return true; }),
       monsters: 0, extraMon: 0, monSpd: 0, speedK: 1.00, accelEvery: 4,
       monColors: []
@@ -173,41 +184,41 @@
     {
       id: 'plus',
       name: '十字广场',
-      note: '双向长廊 · 3 只怪兽',
+      note: '双向长廊 · 5 只怪兽',
       cells: makeCells(function (x, z) {
-        return (z >= MC - 3 && z <= MC + 3) || (x >= MC - 3 && x <= MC + 3);
+        return (Math.abs(z - MC) <= 6) || (Math.abs(x - MC) <= 6);
       }),
-      monsters: 3, extraMon: 1, monSpd: 2.5, speedK: 1.06, accelEvery: 3,
-      monColors: [0xa06be0, 0x4ec7d8, 0xe2745a]
+      monsters: 5, extraMon: 1, monSpd: 2.5, speedK: 1.06, accelEvery: 3,
+      monColors: [0xa06be0, 0x4ec7d8, 0xe2745a, 0xffb03a, 0x7ad46f]
     },
     {
       id: 'diamond',
       name: '菱形花园',
-      note: '四角消失 · 3 只怪兽',
+      note: '四角消失 · 4 只怪兽',
       cells: makeCells(function (x, z) {
-        return Math.abs(x - MC) + Math.abs(z - MC) <= 8;
+        return Math.abs(x - MC) + Math.abs(z - MC) <= MC;
       }),
-      monsters: 3, extraMon: 0, monSpd: 2.4, speedK: 1.10, accelEvery: 3,
-      monColors: [0xa06be0, 0xe2745a, 0x4ec7d8]
+      monsters: 4, extraMon: 1, monSpd: 2.4, speedK: 1.10, accelEvery: 3,
+      monColors: [0xa06be0, 0xe2745a, 0x4ec7d8, 0xffb03a]
     },
     {
       id: 'ring',
       name: '环形赛道',
-      note: '中间留空 · 3 只怪兽',
+      note: '中间留空 · 5 只怪兽',
       cells: makeCells(function (x, z) {
         var dx = Math.abs(x - MC), dz = Math.abs(z - MC);
-        return !(dx <= 3 && dz <= 3);
+        return !(dx <= 7 && dz <= 7);
       }),
-      monsters: 3, extraMon: 1, monSpd: 2.3, speedK: 1.08, accelEvery: 3,
-      monColors: [0xe2745a, 0xa06be0, 0x4ec7d8]
+      monsters: 5, extraMon: 2, monSpd: 2.3, speedK: 1.08, accelEvery: 3,
+      monColors: [0xe2745a, 0xa06be0, 0x4ec7d8, 0xffb03a, 0x7ad46f]
     },
     {
       id: 'maze',
       name: '糖果迷宫',
-      note: '障碍遍布 · 3 只怪兽',
+      note: '中央四门房间 · 5 只怪兽',
       cells: makeCells(function (x, z) { return !inMazeBlock(x, z); }),
-      monsters: 3, extraMon: 1, monSpd: 2.2, speedK: 1.12, accelEvery: 3,
-      monColors: [0xa06be0, 0x4ec7d8, 0xe2745a]
+      monsters: 5, extraMon: 1, monSpd: 2.2, speedK: 1.12, accelEvery: 3,
+      monColors: [0xa06be0, 0x4ec7d8, 0xe2745a, 0xffb03a, 0x7ad46f]
     }
   ];
 
@@ -392,7 +403,13 @@
   var canvas = document.getElementById('c');
   var scene, camera, renderer, clock;
   var sunLight;
-  var baseCam = new THREE.Vector3(0, 26, 20);
+  /* 相机偏移：游玩时跟随蛇头并保持格子可读；菜单时退到能看清整张地图的距离 */
+  var camOffPlay = new THREE.Vector3(0, 26, 20);
+  var camOffMenu = new THREE.Vector3(0, 26, 20);
+  var camMenuLookZ = 3;               /* 菜单注视点前移量：把场地推到画面偏上，别被卡片压住 */
+  var camViewCells = 19;              /* 当前画面窄边能看到多少格 */
+  var camHalfX = 20, camHalfZNear = 20, camHalfZFar = 20;  /* 实测可见半宽/半深（格） */
+  var camLimX = 8, camLimZmin = -8, camLimZmax = 8;        /* 注视点允许的偏移范围 */
   var camPos = new THREE.Vector3(0, 26, 20);
   var camLook = new THREE.Vector3(0, 0, 0);
   var lookTarget = new THREE.Vector3();
@@ -484,7 +501,8 @@
   /* ---------------- 棋盘纹理（按地图形状遮罩，形状外透明） ---------------- */
   function makeBoardTexture(cells) {
     var n = MS;
-    var S = n * 64;                 /* 64 的整数倍，格子边缘不出缝 */
+    var TXC = 40;                   /* 每格 40 像素：35×35 → 1400² 画布，手机上也不至于吃内存 */
+    var S = n * TXC;
     var cv = document.createElement('canvas');
     cv.width = cv.height = S;
     var g = cv.getContext('2d');
@@ -510,16 +528,17 @@
     }
     g.clip();
 
-    /* 2. 草叶噪点 */
-    for (var k = 0; k < 2600; k++) {
+    /* 2. 草叶噪点（随画布面积缩放，密度保持一致） */
+    var nNoise = Math.round(S * 2.4);
+    for (var k = 0; k < nNoise; k++) {
       var px = Math.random() * S, py = Math.random() * S;
       g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.10)' : 'rgba(40,110,30,0.08)';
-      g.fillRect(px, py, 2, 5);
+      g.fillRect(px, py, 2, 3);
     }
 
     /* 3. 细网格 */
     g.strokeStyle = 'rgba(255,255,255,0.15)';
-    g.lineWidth = 2;
+    g.lineWidth = Math.max(1, s * 0.05);
     for (z = 0; z < n; z++) {
       for (x = 0; x < n; x++) {
         if (!cellFree(cells, x, z)) continue;
@@ -702,7 +721,7 @@
 
     /* ---------- 2.5 内部障碍：立起实心糖果块 ---------- */
     if (innerIdx.length) {
-      var blockGeo = new THREE.BoxGeometry(CELL * 0.96, 0.64, CELL * 0.96);
+      var blockGeo = new THREE.BoxGeometry(CELL * 0.96, 0.95, CELL * 0.96);
       var blocks = new THREE.InstancedMesh(blockGeo, MAT.block, innerIdx.length);
       blocks.castShadow = true;
       blocks.receiveShadow = true;
@@ -712,7 +731,7 @@
       var base = new THREE.Color(), tmpc = new THREE.Color();
       for (i = 0; i < innerIdx.length; i++) {
         var ic = innerIdx[i];
-        d.position.set(gx2w(ic.x), 0.32, gx2w(ic.z));
+        d.position.set(gx2w(ic.x), 0.475, gx2w(ic.z));
         d.rotation.set(0, 0, 0);
         d.scale.set(1, 1, 1);
         d.updateMatrix();
@@ -812,12 +831,13 @@
     /* 山丘 */
     buildHills();
     /* 蝴蝶 */
-    for (var b = 0; b < 3; b++) { makeButterfly([0xffd166, 0xff8fb1, 0xa8e6ff][b]); }
+    for (var b = 0; b < 4; b++) { makeButterfly([0xffd166, 0xff8fb1, 0xa8e6ff, 0xb9f2c0][b]); }
   }
 
   /* 圆滚滚的果冻树 */
   function buildTrees() {
-    var N = 16;
+    /* 数量跟着场地周长走：树太密会挡住场地，太稀又显得荒 */
+    var N = Math.round(WALL * 1.9);
     var trunkGeo = new THREE.CylinderGeometry(0.19, 0.27, 1.0, 8);
     var crownGeo = new THREE.SphereGeometry(1, 16, 12);
     var trunks = new THREE.InstancedMesh(trunkGeo, MAT.trunk, N);
@@ -827,21 +847,14 @@
     var d = new THREE.Object3D();
     var c = new THREE.Color();
 
-    /* 相机距离随地图大小变化，树的环半径也跟着走 */
-    var camR = Math.sqrt(baseCam.x * baseCam.x + baseCam.z * baseCam.z);
-    var near = WALL + 4.0;
-    var far = WALL + 15.0;
+    /* 环绕场地外圈散布（相机是跟随的，所以只按场地边界排，不跟相机走） */
+    var near = WALL + 3.5;
+    var far = WALL + 17.0;
 
     for (var i = 0; i < N; i++) {
-      /* 环绕场地散布，避开相机脚下 */
-      var ang = (i / N) * TAU + rand(-0.30, 0.30);
+      var ang = (i / N) * TAU + rand(-0.24, 0.24);
       var rad = rand(near, far);
       var x = Math.cos(ang) * rad, z = Math.sin(ang) * rad;
-      var cdx = x - baseCam.x, cdz = z - baseCam.z;
-      if (Math.sqrt(cdx * cdx + cdz * cdz) < camR * 0.80) {
-        rad += 12;
-        x = Math.cos(ang) * rad; z = Math.sin(ang) * rad;
-      }
       var s = rand(0.85, 1.45);
 
       /* 树干（矮而粗，被画面边缘裁到时不会只剩一根柱子） */
@@ -874,7 +887,7 @@
 
   /* 场外小花点缀 */
   function buildFlowers() {
-    var N = 220;
+    var N = Math.round(WALL * 18);
     var geo = new THREE.SphereGeometry(0.085, 6, 5);
     var mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
     var mesh = new THREE.InstancedMesh(geo, mat, N);
@@ -884,7 +897,7 @@
     var palette = [0xfff4f8, 0xffe36b, 0xff9ec4, 0xffb46b, 0xffffff, 0xc9a7ff];
     for (var i = 0; i < N; i++) {
       var a = rand(0, TAU);
-      var r = rand(WALL + 0.6, 22);
+      var r = rand(WALL + 0.6, WALL + 16);
       d.position.set(Math.cos(a) * r, 0.06, Math.sin(a) * r);
       d.rotation.set(0, 0, 0);
       var s = rand(0.7, 1.5);
@@ -1272,6 +1285,11 @@
     food.group = g;
   }
 
+  /* 食物生成半径（格）。地图放大后如果还满场随机撒，苹果经常落在视野外，
+     孩子会以为「场上没有苹果」而原地打转。所以按由近到远的档次找位置：
+     多数时候就在眼前几格，偶尔远一点留点探索感。 */
+  var FOOD_TIERS = [6, 8, 10, 13, 17, 22];
+
   function placeFood() {
     var occ = {};
     for (var i = 0; i < snake.cells.length; i++) {
@@ -1281,18 +1299,30 @@
     for (var m = 0; m < monsters.length; m++) {
       occ[cellKey(monsters[m].gx, monsters[m].gz)] = 1;
     }
-    var free = [];
-    for (var z = 0; z < MS; z++) {
-      for (var x = 0; x < MS; x++) {
-        if (!cellFree(G.cells, x, z)) continue;
-        if (occ[cellKey(x, z)]) continue;
-        free.push({ x: x, z: z });
+    var head = snake.cells[0] || { x: MC, z: MC };
+
+    /* 偏向前面的档次：pow(1.7) 让近处权重远大于远处 */
+    var pick = Math.min(FOOD_TIERS.length - 1,
+      Math.floor(Math.pow(Math.random(), 2.2) * FOOD_TIERS.length));
+
+    var chosen = null;
+    for (var t = pick; t < FOOD_TIERS.length && !chosen; t++) {
+      var R = FOOD_TIERS[t];
+      var list = [];
+      for (var z = 0; z < MS; z++) {
+        for (var x = 0; x < MS; x++) {
+          if (!cellFree(G.cells, x, z)) continue;
+          if (occ[cellKey(x, z)]) continue;
+          if (Math.abs(x - head.x) + Math.abs(z - head.z) > R) continue;
+          list.push({ x: x, z: z });
+        }
       }
+      if (list.length) chosen = list[Math.floor(Math.random() * list.length)];
     }
-    if (!free.length) return;
-    var c = free[Math.floor(Math.random() * free.length)];
-    food.gx = c.x;
-    food.gz = c.z;
+    if (!chosen) return;
+
+    food.gx = chosen.x;
+    food.gz = chosen.z;
     /* 每 GOLD_EVERY 口之后的那个是金苹果 */
     food.gold = ((G.eaten + 1) % GOLD_EVERY === 0);
     buildFood();
@@ -1673,6 +1703,7 @@
     placeFood();
     updateHud();
     updateMapTag();
+    rebuildMiniMask();
   }
 
   /* 换地图：重建场地 + 重开一局（菜单里选图时调用） */
@@ -1820,31 +1851,39 @@
     updateParticles(dt);
     updateCamera(dt, G.time);
     updateDecor(dt);
+    if (G.state !== 'menu') { mini.t += dt; drawMini(); }
   }
 
   function updateCamera(dt, time) {
-    var hp = segPos.length ? segPos[0] : { x: 0, z: 0 };
-    var fx = hp.x * 0.15, fz = hp.z * 0.15;
+    var hp = segPos.length ? segPos[0] : { x: gx2w(MC), z: gx2w(MC) };
+    var k = 1 - Math.pow(0.0009, dt);
 
-    var lookZ = 0;
-    if (G.state === 'menu' || G.state === 'over') {
-      /* 菜单时轻微摆动，突出立体感；取景中心前移，让场地位于画面上部不被卡片压住 */
+    if (G.state === 'menu') {
+      /* 菜单：拉远到能看清整张地图，并轻微摆动突出立体感 */
       var ang = Math.sin(time * 0.24) * 0.20;
       var ca = Math.cos(ang), sa = Math.sin(ang);
-      v3a.set(baseCam.x * ca - baseCam.z * sa, baseCam.y, baseCam.x * sa + baseCam.z * ca);
-      fx = 0; fz = 0;
-      lookZ = 2.4;
+      v3a.set(camOffMenu.x * ca - camOffMenu.z * sa, camOffMenu.y, camOffMenu.x * sa + camOffMenu.z * ca);
+      lookTarget.set(0, 0.35, camMenuLookZ);
     } else {
-      v3a.set(baseCam.x + fx, baseCam.y, baseCam.z + fz);
+      /* 游玩 / 暂停 / 结束：跟着蛇头走，但眼界不越出场地边界 */
+      var tx = clamp(hp.x, -camLimX, camLimX);
+      var tz = clamp(hp.z, camLimZmin, camLimZmax);
+      lookTarget.set(tx, 0.35, tz);
+      v3a.set(tx + camOffPlay.x, camOffPlay.y, tz + camOffPlay.z);
     }
 
-    var k = 1 - Math.pow(0.0009, dt);
     camPos.lerp(v3a, k);
-    camera.position.copy(camPos);
-
-    lookTarget.set(fx * 1.15, 0.35, fz * 1.15 + lookZ);
+    lookTarget.set(lookTarget.x, 0.35, lookTarget.z);
     camLook.lerp(lookTarget, k);
+    camera.position.copy(camPos);
     camera.lookAt(camLook);
+
+    /* 阴影相机跟着视野走，否则跑到远处影子会消失 */
+    if (sunLight) {
+      sunLight.position.set(camLook.x + 12, 24, camLook.z + 14);
+      sunLight.target.position.set(camLook.x, 0, camLook.z);
+      sunLight.target.updateMatrixWorld();
+    }
 
     if (G.shake > 0.001) {
       G.shake = Math.max(0, G.shake - dt * 1.7);
@@ -1852,6 +1891,120 @@
       camera.position.x += rand(-amp, amp);
       camera.position.y += rand(-amp, amp);
       camera.position.z += rand(-amp, amp);
+    }
+  }
+
+  /* 相机瞬移到位（开局 / 回菜单时用，避免从上一个位置慢慢飘过去） */
+  function snapCameraToHead() {
+    var c0 = snake.cells[0] || { x: MC, z: MC };
+    var hx = clamp(gx2w(c0.x), -camLimX, camLimX);
+    var hz = clamp(gx2w(c0.z), camLimZmin, camLimZmax);
+    camPos.set(hx + camOffPlay.x, camOffPlay.y, hz + camOffPlay.z);
+    camLook.set(hx, 0.35, hz);
+    camera.position.copy(camPos);
+    camera.lookAt(camLook);
+  }
+
+  function snapCameraToMenu() {
+    camPos.copy(camOffMenu);
+    camLook.set(0, 0.35, camMenuLookZ);
+    camera.position.copy(camPos);
+    camera.lookAt(camLook);
+  }
+
+  /* =========================================================
+     小地图（左下角）
+     35×35 之后相机只能看到局部，苹果和怪兽常在视野外，
+     没有小地图孩子会以为「场上什么都没有」。
+     ========================================================= */
+  var mini = { mask: null, t: 0, px: 0 };
+
+  function rebuildMiniMask() {
+    var cv = el.mini;
+    if (!cv) return;
+    /* 4 倍超采样：缩到 92px 时边缘不至于糊成一团 */
+    var box = MS * 4;
+    var off = document.createElement('canvas');
+    off.width = off.height = box;
+    var g = off.getContext('2d');
+    g.clearRect(0, 0, box, box);
+    g.fillStyle = '#54a866';
+    for (var z = 0; z < MS; z++) {
+      for (var x = 0; x < MS; x++) {
+        if (cellFree(G.cells, x, z)) g.fillRect(x * 4, z * 4, 4, 4);
+      }
+    }
+    mini.mask = off;
+    mini.t = 1;
+    sizeMiniCanvas();
+    drawMini();
+  }
+
+  /* 画布后备尺寸对齐 devicePixelRatio（别让它停在默认的 300×150） */
+  function sizeMiniCanvas() {
+    var cv = el.mini;
+    if (!cv) return 0;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var css = cv.clientWidth || 92;
+    var px = Math.max(32, Math.round(css * dpr));
+    if (cv.width !== px) { cv.width = px; cv.height = px; mini.px = 0; }
+    return px;
+  }
+
+  function drawMini() {
+    var cv = el.mini;
+    if (!cv || !mini.mask) return;
+    var px = sizeMiniCanvas();
+    if (!px) return;
+    if (mini.px === px && mini.t < 0.1) return;   /* 限流，别每帧重画 */
+    mini.px = px;
+    mini.t = 0;
+
+    var g = cv.getContext('2d');
+    var pad = px * 0.075;
+    var box = px - pad * 2;
+    var k = box / MS;
+    g.clearRect(0, 0, px, px);
+    g.drawImage(mini.mask, pad, pad, box, box);
+    g.strokeStyle = 'rgba(30, 80, 45, .28)';
+    g.lineWidth = Math.max(1, px * 0.014);
+    g.strokeRect(pad, pad, box, box);
+
+    /* 蛇身 */
+    g.fillStyle = '#d8ffae';
+    var r = Math.max(1, k);
+    for (var i = snake.cells.length - 1; i >= 0; i--) {
+      var c = snake.cells[i];
+      g.fillRect(pad + c.x * k, pad + c.z * k, r, r);
+    }
+    /* 食物：白点 + 红/金描边 */
+    if (food.gx !== undefined) {
+      g.beginPath();
+      g.arc(pad + (food.gx + 0.5) * k, pad + (food.gz + 0.5) * k, Math.max(2.6, k * 1.05), 0, TAU);
+      g.fillStyle = '#ffffff';
+      g.fill();
+      g.lineWidth = Math.max(1, k * 0.45);
+      g.strokeStyle = food.gold ? '#ffb703' : '#e8453f';
+      g.stroke();
+    }
+    /* 怪兽：红点 */
+    for (var m = 0; m < monsters.length; m++) {
+      var mo = monsters[m];
+      g.beginPath();
+      g.arc(pad + (mo.gx + 0.5) * k, pad + (mo.gz + 0.5) * k, Math.max(2.3, k * 0.92), 0, TAU);
+      g.fillStyle = '#ff3b30';
+      g.fill();
+    }
+    /* 蛇头：白圈加深色边，永远最显眼 */
+    if (snake.cells.length) {
+      var h = snake.cells[0];
+      g.beginPath();
+      g.arc(pad + (h.x + 0.5) * k, pad + (h.z + 0.5) * k, Math.max(3.3, k * 1.4), 0, TAU);
+      g.fillStyle = '#ffffff';
+      g.fill();
+      g.lineWidth = Math.max(1.2, k * 0.5);
+      g.strokeStyle = '#1d7a3f';
+      g.stroke();
     }
   }
 
@@ -1877,36 +2030,103 @@
   }
 
   /* =========================================================
-     相机自适应（二分求距离，保证场地完整入画）
+     相机：二分求「恰好装下 N 格」的距离
+     场地从 17×17 放到 35×35，如果还是把整张地图塞进屏幕，手机上每格只剩 11px，
+     蛇会变成一个看不清的小点。所以游玩时改为跟随蛇头、只保证「格子看得清」，
+     整张地图的方位交给小地图。
      ========================================================= */
-  function fitCamera() {
+  function viewCells() {
     var w = window.innerWidth, h = Math.max(1, window.innerHeight);
-    var aspect = w / h;
-    camera.aspect = aspect;
-    camera.updateProjectionMatrix();
+    var shortSide = Math.min(w, h);
+    /* 让一个格子大约占 TARGET_CELL_PX 个屏幕像素 */
+    return clamp(Math.round(shortSide * 0.94 / TARGET_CELL_PX), VIEW_MIN, VIEW_MAX);
+  }
 
-    var margin = MS * 0.5 * CELL + 0.9;
-    var elev = 46 * DEG;
-    var lo = 8, hi = 130;
-    var P = new THREE.Vector3();
+  /* 求出「画面窄边恰好看到 span 格」时的相机距离（复用二分投影法，俯角/宽高比自动适配） */
+  var _fitP = new THREE.Vector3();
+  function solveCamDist(span) {
+    var half = span * 0.5 * CELL;
+    var lo = 4, hi = 260;
     var corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
-
-    for (var it = 0; it < 34; it++) {
+    for (var it = 0; it < 30; it++) {
       var d = (lo + hi) / 2;
-      camera.position.set(0, Math.sin(elev) * d, Math.cos(elev) * d);
+      camera.position.set(0, Math.sin(CAM_ELEV) * d, Math.cos(CAM_ELEV) * d);
       camera.lookAt(0, 0, 0);
       camera.updateMatrixWorld(true);
       camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
-
       var ok = true;
       for (var c = 0; c < 4; c++) {
-        P.set(corners[c][0] * margin, 1.05, corners[c][1] * margin).project(camera);
-        if (Math.abs(P.x) > 0.93 || Math.abs(P.y) > 0.90) { ok = false; break; }
+        _fitP.set(corners[c][0] * half, 1.05, corners[c][1] * half).project(camera);
+        if (Math.abs(_fitP.x) > 0.96 || Math.abs(_fitP.y) > 0.94) { ok = false; break; }
       }
       if (ok) hi = d; else lo = d;
     }
+    return hi;
+  }
 
-    baseCam.set(0, Math.sin(elev) * hi, Math.cos(elev) * hi);
+  function fitCamera() {
+    var w = window.innerWidth, h = Math.max(1, window.innerHeight);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+
+    /* 游玩：窄边看 camViewCells 格；菜单：尽量看到整张地图 */
+    camViewCells = viewCells();
+    var dPlay = solveCamDist(camViewCells);
+    camOffPlay.set(0, Math.sin(CAM_ELEV) * dPlay, Math.cos(CAM_ELEV) * dPlay);
+
+    var shortSide = Math.min(w, h);
+    var menuSpan = Math.min(MS + 2, Math.round(shortSide * 0.94 / 18));
+    var dMenu = solveCamDist(menuSpan);
+    camOffMenu.set(0, Math.sin(CAM_ELEV) * dMenu, Math.cos(CAM_ELEV) * dMenu);
+    camMenuLookZ = menuSpan * 0.16;
+
+    measureView();
+
+    /* 允许的注视点偏移：
+       视野装得下整个场地 → 固定居中，不乱飘；
+       装不下 → 跟着蛇头走，但最多在场地边缘外露 GRASS_MARGIN 格草地，
+       这样即使蛇贴到墙边，画面也不会大半张都是草地。 */
+    var GRASS = 4;
+    camLimX = Math.max(0, WALL + GRASS - camHalfX);
+    camLimZmax = Math.max(0, WALL + GRASS - camHalfZNear);
+    camLimZmin = Math.min(0, camHalfZFar - WALL - GRASS);
+
+    /* 阴影范围跟着可见范围走：太大影子会糊，太小远处没影子 */
+    if (sunLight) {
+      var sc = sunLight.shadow.camera;
+      var half2 = camViewCells * 0.62 + 4;
+      sc.left = -half2; sc.right = half2; sc.top = half2; sc.bottom = -half2;
+      sc.near = 2; sc.far = 84;
+      sc.updateProjectionMatrix();
+    }
+  }
+
+  /* 实测「游玩相机在注视点处能看多远」：
+     X 半宽（左右）、Z 近侧半深（屏幕下方，朝相机一侧）、Z 远侧半深（屏幕上方）。
+     用射线的「屏幕边缘 → 地面 y=0」求交，解析解，不做二分
+     （二分会在点越过相机、投影翻转时跑飞）。 */
+  var _mv = new THREE.Vector3();
+  function measureView() {
+    camera.position.copy(camOffPlay);
+    camera.lookAt(0, 0.35, 0);
+    camera.updateMatrixWorld(true);
+    camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+
+    /* 以注视点为原点的地面交点（相机在 (+z, +y) 一侧） */
+    var ground = function (nx, ny) {
+      _mv.set(nx, ny, 0.5).unproject(camera).sub(camera.position).normalize();
+      if (_mv.y >= -1e-4) return null;                    /* 朝上/水平：打不到地面 */
+      var t = -camera.position.y / _mv.y;
+      return { x: camera.position.x + _mv.x * t, z: camera.position.z + _mv.z * t };
+    };
+
+    var near = ground(0, -0.94);      /* 屏幕下方 = 靠近相机的一侧 */
+    var far = ground(0, 0.94);        /* 屏幕上方 = 远端（可能直接看到地平线） */
+    var right = ground(0.95, 0);
+
+    camHalfZNear = near ? Math.max(1, near.z) : 20;
+    camHalfZFar = far ? Math.max(1, -far.z) : 300;
+    camHalfX = right ? Math.max(1, right.x) : 20;
   }
 
   /* =========================================================
@@ -1931,6 +2151,7 @@
     el.icoOn = document.getElementById('icoSoundOn');
     el.icoOff = document.getElementById('icoSoundOff');
     el.maps = document.getElementById('maps');
+    el.mini = document.getElementById('mini');
     el.mapNote = document.getElementById('mapNote');
     el.mapTag = document.getElementById('mapTag');
     el.toast = document.getElementById('toast');
@@ -1947,16 +2168,23 @@
     el.mapTag.textContent = G.map.name + (n ? ' · ' + n + ' 怪兽' : ' · 无怪兽');
   }
 
-  /* 用可通行表直接画一张迷你形状图，保证和真实场地完全一致 */
+  /* 用可通行表直接画一张迷你形状图，保证和真实场地完全一致。
+     35×35 逐格会生成上千个 <rect>，所以按行做游程合并（连续的可通行格并成一条）。 */
   function mapSvg(m) {
     var c = m.ready || m.cells;
     var g = 100 / MS;
-    var s = '<svg viewBox="0 0 100 100" aria-hidden="true">';
+    /* 每条矩形多画 0.08，盖住相邻条之间的抗锯齿接缝（否则缩略图会布满细纹） */
+    var OV = 0.08;
+    var s = '<svg viewBox="0 0 100 100" shape-rendering="crispEdges" aria-hidden="true">';
     for (var z = 0; z < MS; z++) {
-      for (var x = 0; x < MS; x++) {
-        if (!cellFree(c, x, z)) continue;
-        s += '<rect x="' + (x * g).toFixed(2) + '" y="' + (z * g).toFixed(2) +
-          '" width="' + g.toFixed(2) + '" height="' + g.toFixed(2) + '"/>';
+      var x = 0;
+      while (x < MS) {
+        if (!cellFree(c, x, z)) { x++; continue; }
+        var x0 = x;
+        while (x < MS && cellFree(c, x, z)) x++;
+        s += '<rect x="' + (x0 * g).toFixed(2) + '" y="' + (z * g).toFixed(2) +
+          '" width="' + (((x - x0) * g) + OV).toFixed(2) +
+          '" height="' + (g + OV).toFixed(2) + '"/>';
       }
     }
     return s + '</svg>';
@@ -2062,10 +2290,8 @@
     el.pause.classList.add('hidden');
     el.hud.classList.add('show');
     G.state = 'playing';
-    /* 相机立刻归位，避免从菜单摆动角度慢慢飘过来 */
-    camera.position.copy(baseCam);
-    camPos.copy(baseCam);
-    camLook.set(0, 0.35, 0);
+    /* 相机立刻归位到蛇头，避免从菜单摆动角度慢慢飘过来 */
+    snapCameraToHead();
   }
 
   function pauseGame() {
@@ -2220,8 +2446,9 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(w, h, false);
     fitCamera();
-    camPos.copy(baseCam);
-    camera.position.copy(baseCam);
+    /* 菜单态直接归位；游玩态交给插值平滑过渡，避免手机地址栏收起时画面跳一下 */
+    if (G.state === 'menu') snapCameraToMenu();
+    rebuildMiniMask();
   }
 
   /* =========================================================
@@ -2238,7 +2465,7 @@
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     scene = new THREE.Scene();
-    scene.fog = new THREE.Fog(0xcde9f8, 78, 210);
+    scene.fog = new THREE.Fog(0xcde9f8, 92, 230);
     scene.background = null;
 
     camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.2, 420);
@@ -2435,6 +2662,23 @@
           x: +camera.position.x.toFixed(2),
           y: +camera.position.y.toFixed(2),
           z: +camera.position.z.toFixed(2)
+        },
+        viewCells: camViewCells,
+        view: {
+          cells: camViewCells,
+          halfX: +camHalfX.toFixed(1),
+          halfZn: +camHalfZNear.toFixed(1),
+          halfZf: +camHalfZFar.toFixed(1),
+          limX: +camLimX.toFixed(1),
+          limZmin: +camLimZmin.toFixed(1),
+          limZmax: +camLimZmax.toFixed(1),
+          dist: +camOffPlay.length().toFixed(1)
+        },
+        look: { x: +camLook.x.toFixed(2), z: +camLook.z.toFixed(2) },
+        mini: {
+          on: !!el.mini,
+          w: el.mini ? el.mini.width : 0,
+          h: el.mini ? el.mini.height : 0
         },
         tris: renderer.info.render.triangles,
         calls: renderer.info.render.calls,

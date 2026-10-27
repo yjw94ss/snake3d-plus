@@ -528,3 +528,22 @@ body.touch #pad { display: grid; }
   .card { padding: 16px 18px 14px; border-radius: 26px; }
   #pad { grid-template-columns: repeat(3, 50px); grid-template-rows: repeat(3, 50px); }
 }
+
+/* ---------- 小地图 ---------- */
+#mini {
+  position: absolute;
+  left: 12px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  width: 92px;
+  height: 92px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .78);
+  box-shadow: 0 5px 16px rgba(15, 45, 75, .18), inset 0 1px 0 #fff;
+  pointer-events: none;
+}
+@media (min-width: 900px) {
+  #mini { width: 112px; height: 112px; }
+}
+@media (max-height: 560px) {
+  #mini { width: 76px; height: 76px; border-radius: 12px; }
+}
