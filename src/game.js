@@ -23,19 +23,30 @@
   var VIEW_MIN = 13, VIEW_MAX = 37; // 画面窄边最少 / 最多能看到多少格（屏幕够大时正好装下整张地图）
   var CAM_ELEV = 46 * DEG;          // 俯角
 
-  var DIFFS = {
-    easy:   { step: 0.300, min: 0.190 },
-    normal: { step: 0.235, min: 0.140 },
-    hard:   { step: 0.180, min: 0.108 }
-  };
-  var ACCEL_STEP = 0.0055;
+  /* 速度档：孩子反馈「太快」，所以从「三档难度」改成 5 档速度，且随时可调
+     （菜单里选一次会记住，玩到一半觉得快还能在暂停界面就地减速）。
+     step  = 每格多少秒（越大越慢）
+     floor = 一路吃下去最快能到多少秒（加速下限）
+     reinf = 分数到多少才多来一批怪兽（0 = 不来） */
+  var SPEEDS = [
+    { id: 'snail',  label: '很慢', step: 0.440, floor: 0.264, reinf: 0    },
+    { id: 'slow',   label: '慢',   step: 0.360, floor: 0.216, reinf: 0    },
+    { id: 'normal', label: '刚好', step: 0.235, floor: 0.141, reinf: 90   },
+    { id: 'fast',   label: '快',   step: 0.180, floor: 0.108, reinf: 60   },
+    { id: 'turbo',  label: '飞快', step: 0.150, floor: 0.090, reinf: 45   }
+  ];
+  var DEFAULT_SPEED = 1;    /* 默认「慢」：0.36 秒/格 ≈ 每秒 3 格（旧版 normal 是 4.3 格/秒） */
+  /* 老存档 / 老测试传进来的难度名，映射到最接近的速度档 */
+  var SPEED_ALIAS = { easy: 'slow', normal: 'normal', hard: 'fast' };
+
+  /* 每吃 accelEvery 口，步进按比例缩短 —— 用比例而不是固定值，
+     这样「很慢」和「飞快」两档的手感变化幅度一致，不会慢档几乎不加速。 */
+  var ACCEL_RATE = 0.974;
   var MAX_SEG = MS * MS;
 
   var GOLD_EVERY = 4;               // 每吃这么多口，下一个是金苹果
   var GOLD_SCORE = 30;
   var BASE_SCORE = 10;
-  /* 分数到这些值时，地图上会多来一只怪兽（easy 不来） */
-  var REINFORCE_AT = { easy: 0, normal: 90, hard: 60 };
   /* 开局保护：前几个 tick 内怪兽还在「巡逻」，不会把蛇撞死。
      孩子刚开局还在找方向，不该被这么冤枉地结束。 */
   var GUARD_TICKS = 7;
@@ -249,15 +260,16 @@
   /* ---------------- 运行状态 ---------------- */
   var G = {
     state: 'menu',        // menu | playing | paused | over
-    diff: 'normal',
+    diff: 'slow',         // 当前速度档 id（沿用旧字段名，样式/存档都靠它）
+    speed: DEFAULT_SPEED, // 速度档下标 0..SPEEDS.length-1
     mapId: 'classic',
     map: MAPS[0],
     cells: null,          // 当前地图的可通行表（激活时复制一份）
     score: 0,
     best: 0,
     eaten: 0,
-    stepDur: DIFFS.normal.step,
-    minDur: DIFFS.normal.min,
+    stepDur: SPEEDS[DEFAULT_SPEED].step,
+    minDur: SPEEDS[DEFAULT_SPEED].floor,
     stepT: 0,
     tMix: 1,
     monT: 0,
@@ -1296,7 +1308,12 @@
   ];
   var FOOD_BAND_W = [0.16, 0.24, 0.26, 0.19, 0.15];
   var FOOD_HIST_N = 6;
-  var FOOD_AVOID = [7, 5, 3];   // 排斥半径，逐个放宽，最后不限
+  /* [需要多开阔, 与历史食物的最小间距]，从紧到松 */
+  var FOOD_RELAX = [
+    [2, 6], [2, 4],
+    [1, 6], [1, 4], [1, 2],
+    [0, 2], [0, 0]
+  ];
   var foodHist = [];
 
   function pickBand() {
@@ -1329,10 +1346,13 @@
     var b0 = pickBand();
 
     var chosen = null;
-    /* 外层：排斥半径从紧到松（最后一轮不排斥）；内层：从抽中的环带向外轮转。
-       这样既能保证「离上次远」，又不会因为窄地形某个环带全空而卡死。 */
-    for (var pass = 0; pass <= FOOD_AVOID.length && !chosen; pass++) {
-      var rad = pass < FOOD_AVOID.length ? FOOD_AVOID[pass] : 0;
+    /* 三级放宽，上一级挑不出位置才退到下一级：
+         ① 离墙 ≥2 格 + 离上次的食物远   —— 想要的常态
+         ② 离墙 ≥1 格 + 离上次的食物远   —— 窄地形（迷宫/环形）里贴着糖果块的格子
+         ③ 只看离墙，不再管历史位置       —— 极端情况兜底，至少不贴墙 */
+    for (var relax = 0; relax < FOOD_RELAX.length && !chosen; relax++) {
+      var needOpen = FOOD_RELAX[relax][0];
+      var rad = FOOD_RELAX[relax][1];
       for (var k = 0; k < FOOD_BANDS.length && !chosen; k++) {
         var band = FOOD_BANDS[(b0 + k) % FOOD_BANDS.length];
         var lo = band[0], hi = band[1];
@@ -1341,6 +1361,7 @@
           for (var x = 0; x < MS; x++) {
             if (!cellFree(G.cells, x, z)) continue;
             if (occ[cellKey(x, z)]) continue;
+            if (needOpen > 1 && openAt(x, z) < needOpen) continue;
             var d = Math.abs(x - head.x) + Math.abs(z - head.z);
             if (d < lo || d > hi) continue;
             if (rad && !farFromHist(x, z, rad)) continue;
@@ -1604,7 +1625,7 @@
   function maybeReinforce() {
     if (!G.map || !G.map.monsters) return;
     if (G.reinforced) return;
-    var at = REINFORCE_AT[G.diff] || 0;
+    var at = SPEEDS[G.speed].reinf || 0;
     if (!at || G.score < at) return;
     var cap = G.map.monsters + (G.map.extraMon || 0);
     if (monsters.length >= cap) return;
@@ -1712,10 +1733,73 @@
   /* =========================================================
      游戏逻辑
      ========================================================= */
+  /* ---------------- 速度 ---------------- */
+  function speedIndex(id) {
+    if (typeof id === 'number') return clamp(Math.round(id), 0, SPEEDS.length - 1);
+    if (SPEED_ALIAS[id]) id = SPEED_ALIAS[id];
+    for (var i = 0; i < SPEEDS.length; i++) if (SPEEDS[i].id === id) return i;
+    return DEFAULT_SPEED;
+  }
+  function speedBase() { return SPEEDS[G.speed].step / (G.map.speedK || 1); }
+  function speedFloor() { return SPEEDS[G.speed].floor / (G.map.speedK || 1); }
+
+  /* 按「当前档位 + 已经吃了多少口」算出步进。
+     换档时也走这里，所以中途减速不会把已经积累的加速清空、也不会越调越快。 */
+  function applySpeed() {
+    var hi = speedBase(), lo = speedFloor();
+    G.minDur = lo;
+    var n = Math.floor((G.eaten || 0) / (G.map.accelEvery || 4));
+    G.stepDur = clamp(hi * Math.pow(ACCEL_RATE, n), lo, hi);
+    return G.stepDur;
+  }
+
+  /* 每格到最近「不可通行格 / 场地外」的距离（8 邻域切比雪夫，1 = 紧贴墙）。
+     孩子反馈「苹果老长在墙边」：贴着墙的苹果会被糖果块/围栏挡住一半，看着像卡在缝里，
+     所以生成时优先挑 open >= 2 的格子（四周一圈都空）。 */
+  var openDist = null;
+  function buildOpenDist() {
+    var n = MS * MS;
+    var d = new Uint8Array(n);
+    var q = [], i, x, z;
+    for (z = 0; z < MS; z++) {
+      for (x = 0; x < MS; x++) {
+        i = z * MS + x;
+        if (!cellFree(G.cells, x, z)) { d[i] = 0; q.push(i); continue; }
+        /* 场地最外圈也按「贴着外面」算 */
+        if (x === 0 || x === MS - 1 || z === 0 || z === MS - 1) { d[i] = 1; q.push(i); continue; }
+        d[i] = 255;
+      }
+    }
+    /* 8 邻域多源 BFS：FIFO 顺序天然按距离递增，一次扫描就够 */
+    var head = 0;
+    while (head < q.length) {
+      var k = q[head++];
+      var cx = k % MS, cz = (k - cx) / MS;
+      var nd = d[k] + 1;
+      for (var dz = -1; dz <= 1; dz++) {
+        for (var dx = -1; dx <= 1; dx++) {
+          if (!dx && !dz) continue;
+          var nx = cx + dx, nz = cz + dz;
+          if (nx < 0 || nx >= MS || nz < 0 || nz >= MS) continue;
+          var nk = nz * MS + nx;
+          if (d[nk] > nd) { d[nk] = nd; q.push(nk); }
+        }
+      }
+    }
+    openDist = d;
+    return d;
+  }
+  function openAt(x, z) {
+    if (!openDist) return 9;
+    if (x < 0 || x >= MS || z < 0 || z >= MS) return 0;
+    return openDist[z * MS + x];
+  }
+
   function resetGame() {
     /* 当前地图的可通行表（按形状复制一份） */
     prepareMap(G.map);
     G.cells = new Uint8Array(G.map.ready);
+    buildOpenDist();
 
     var sp = findSpawn(G.cells);
     if (sp) {
@@ -1734,8 +1818,7 @@
 
     G.score = 0;
     G.eaten = 0;
-    G.stepDur = DIFFS[G.diff].step / (G.map.speedK || 1);
-    G.minDur = DIFFS[G.diff].min / (G.map.speedK || 1);
+    applySpeed();
     G.stepT = 0;
     G.tMix = 1;
     G.shake = 0;
@@ -1743,8 +1826,8 @@
     G.reinforced = false;
     G.guard = GUARD_TICKS;
 
-    /* 怪兽节奏跟着难度走：简单档更慢，孩子来得及躲 */
-    var k = clamp(G.stepDur / DIFFS.normal.step, 0.80, 1.35);
+    /* 怪兽节奏也跟着速度档走：选了「很慢」怪兽也慢，孩子才来得及躲 */
+    var k = clamp(speedBase() / SPEEDS[2].step, 0.85, 2.30);
     G.monDur = G.map.monsters ? (1 / G.map.monSpd) * k : 1;
 
     spawnMonsters();
@@ -1831,7 +1914,7 @@
     G.eaten++;
 
     if (G.eaten % (G.map.accelEvery || 4) === 0) {
-      G.stepDur = Math.max(G.minDur, G.stepDur - ACCEL_STEP);
+      G.stepDur = Math.max(G.minDur, G.stepDur * ACCEL_RATE);
     }
 
     var h = snake.cells[0];
@@ -2319,6 +2402,60 @@
     updateMapTag();
   }
 
+  /* ---------------- 速度调节 UI（菜单 + 暂停界面各一份） ---------------- */
+  function buildSpeedUI() {
+    var html = '';
+    for (var i = 0; i < SPEEDS.length; i++) {
+      html += '<button type="button" class="spd-btn" data-speed="' + i + '">' +
+        SPEEDS[i].label + '</button>';
+    }
+    var hosts = document.querySelectorAll('.spd-seg');
+    for (var h = 0; h < hosts.length; h++) hosts[h].innerHTML = html;
+
+    /* 用 this 取属性，别在循环里用 var 闭包（否则所有按钮都执行最后一档） */
+    var btns = document.querySelectorAll('.spd-btn');
+    for (var k = 0; k < btns.length; k++) {
+      btns[k].addEventListener('click', function () {
+        setSpeed(+this.getAttribute('data-speed'));
+        Snd.turn();
+      });
+    }
+    syncSpeedUI();
+  }
+
+  function syncSpeedUI() {
+    var btns = document.querySelectorAll('.spd-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', +btns[i].getAttribute('data-speed') === G.speed);
+    }
+    var sp = SPEEDS[G.speed];
+    var txt = sp.label + ' · 每格 ' + sp.step.toFixed(2) + ' 秒';
+    var vals = document.querySelectorAll('.spd-val');
+    for (var v = 0; v < vals.length; v++) vals[v].textContent = txt;
+  }
+
+  /* 改档：立即生效（玩到一半也能减速），并记住选择 */
+  function setSpeed(idx) {
+    G.speed = speedIndex(idx);
+    G.diff = SPEEDS[G.speed].id;
+    applySpeed();
+    syncSpeedUI();
+    saveSpeed();
+    updateMapTag();
+    return { idx: G.speed, id: G.diff, stepDur: +G.stepDur.toFixed(4) };
+  }
+
+  function saveSpeed() {
+    try { localStorage.setItem('snake3d_speed', String(G.speed)); } catch (e) {}
+  }
+  function loadSpeed() {
+    var v = null;
+    try { v = localStorage.getItem('snake3d_speed'); } catch (e) {}
+    var n = v === null ? NaN : parseInt(v, 10);
+    G.speed = isNaN(n) ? DEFAULT_SPEED : clamp(n, 0, SPEEDS.length - 1);
+    G.diff = SPEEDS[G.speed].id;
+  }
+
   function bumpScore() {
     el.chipScore.classList.remove('bump');
     void el.chipScore.offsetWidth;
@@ -2432,18 +2569,6 @@
 
   /* ---------------- 事件 ---------------- */
   function bindEvents() {
-    /* 难度选择 */
-    var pills = document.querySelectorAll('.pill');
-    for (var i = 0; i < pills.length; i++) {
-      (function (btn) {
-        btn.addEventListener('click', function () {
-          for (var k = 0; k < pills.length; k++) pills[k].classList.remove('active');
-          btn.classList.add('active');
-          G.diff = btn.getAttribute('data-diff');
-        });
-      })(pills[i]);
-    }
-
     document.getElementById('btnStart').addEventListener('click', startGame);
     document.getElementById('btnRetry').addEventListener('click', startGame);
     document.getElementById('btnHome').addEventListener('click', toMenu);
@@ -2589,6 +2714,8 @@
 
     clock = new THREE.Clock();
     cacheEls();
+    loadSpeed();
+    buildSpeedUI();
     buildMapUI();
     bindEvents();
     loadBest();
@@ -2742,12 +2869,15 @@
         len: snake.cells.length,
         head: { x: snake.cells[0].x, z: snake.cells[0].z },
         dir: { x: snake.dir.x, z: snake.dir.z },
-        food: { gx: food.gx, gz: food.gz, gold: !!food.gold },
+        food: { gx: food.gx, gz: food.gz, gold: !!food.gold, open: openAt(food.gx, food.gz) },
         stepDur: +G.stepDur.toFixed(4),
         minDur: +G.minDur.toFixed(4),
+        monDur: +G.monDur.toFixed(4),
         monsters: monsters.length,
         reinforced: G.reinforced,
-        reinforceAt: REINFORCE_AT[G.diff] || 0,
+        reinforceAt: SPEEDS[G.speed].reinf || 0,
+        speed: { idx: G.speed, id: SPEEDS[G.speed].id, label: SPEEDS[G.speed].label,
+                 step: SPEEDS[G.speed].step, base: +speedBase().toFixed(4) },
         guard: G.guard,
         guardTicks: GUARD_TICKS,
         monsterPos: monsters.map(function (m) { return { x: m.gx, z: m.gz }; }),
@@ -2784,15 +2914,17 @@
 
     setDir: setDir,
     start: function (d) {
-      if (d) {
-        G.diff = d;
-        var pills = document.querySelectorAll('.pill');
-        for (var i = 0; i < pills.length; i++) {
-          pills[i].classList.toggle('active', pills[i].getAttribute('data-diff') === d);
-        }
-      }
+      if (d !== undefined && d !== null) setSpeed(d);
       startGame();
       return G.state;
+    },
+    /* 速度档：不传参数返回当前档，传 0..4 或档位 id（兼容 'easy'/'normal'/'hard'）则设置 */
+    setSpeed: function (v) { return setSpeed(v); },
+    openAt: function (x, z) { return openAt(x, z); },
+    speeds: function () {
+      return SPEEDS.map(function (s, i) {
+        return { idx: i, id: s.id, label: s.label, step: s.step, floor: s.floor, reinf: s.reinf };
+      });
     },
     pause: pauseGame,
     resume: resumeGame,

@@ -103,10 +103,12 @@ __CSS__
     <h1 class="title">3D 贪吃蛇</h1>
     <p class="subtitle">带小绿蛇去吃水果，每吃一口就长一截！</p>
 
-    <div class="diffs" id="diffs">
-      <button class="pill" data-diff="easy">慢慢爬<small>4 岁 +</small></button>
-      <button class="pill active" data-diff="normal">刚刚好<small>推荐</small></button>
-      <button class="pill" data-diff="hard">再快些<small>小高手</small></button>
+    <div class="speed">
+      <div class="speed-top">
+        <span class="speed-lab">速 度</span>
+        <span class="spd-val" id="spdVal">慢 · 每格 0.36 秒</span>
+      </div>
+      <div class="spd-seg" id="spdMenu" role="group" aria-label="速度"></div>
     </div>
 
     <div class="maps-lab">选 一 张 地 图</div>
@@ -128,7 +130,15 @@ __CSS__
       </svg>
     </div>
     <h2 class="end-title">休息一下</h2>
-    <p class="subtitle" style="margin-bottom:20px">小蛇在原地等你回来</p>
+    <p class="subtitle" style="margin-bottom:16px">小蛇在原地等你回来</p>
+    <!-- 玩到一半觉得快，就地减速，不用回开头重开 -->
+    <div class="speed speed-in-pause">
+      <div class="speed-top">
+        <span class="speed-lab">速 度</span>
+        <span class="spd-val">慢 · 每格 0.36 秒</span>
+      </div>
+      <div class="spd-seg" id="spdPause" role="group" aria-label="速度"></div>
+    </div>
     <button class="btn btn-primary" id="btnResume">继 续 玩</button>
     <button class="btn btn-ghost" id="btnQuit">回到开头</button>
   </div>

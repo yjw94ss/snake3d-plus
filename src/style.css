@@ -114,42 +114,51 @@ body {
   font-weight: 500;
 }
 
-/* ============ 难度 ============ */
-.diffs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-  margin: 18px 0 16px;
+/* ============ 速度调节 ============ */
+.speed { margin: 16px 0 14px; }
+.speed-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 7px;
 }
-.pill {
+.speed-lab {
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  color: #a4b6c7;
+}
+.spd-val {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #6b8199;
+}
+.spd-seg {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.spd-btn {
   border: 2px solid #e4ecf4;
   background: #f5f9fc;
-  border-radius: 17px;
-  padding: 9px 2px 8px;
+  border-radius: 13px;
+  padding: 8px 1px;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 12.5px;
   font-weight: 800;
   color: #6b8199;
   cursor: pointer;
   transition: border-color .16s, background .16s, color .16s, box-shadow .16s, transform .1s;
-  line-height: 1.25;
+  touch-action: manipulation;
 }
-.pill small {
-  display: block;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: #a7bbcd;
-  margin-top: 1px;
-  letter-spacing: .3px;
-}
-.pill:active { transform: scale(.95); }
-.pill.active {
+.spd-btn:active { transform: scale(.94); }
+.spd-btn.active {
   border-color: #38c674;
   background: #eafbf1;
   color: #1c8a4c;
   box-shadow: 0 0 0 4px rgba(56, 198, 116, .13);
 }
-.pill.active small { color: #55b47f; }
+.speed-in-pause { margin: 0 0 16px; }
 
 /* ============ 地图选择 ============ */
 .maps-lab {
@@ -494,8 +503,6 @@ body.touch #pad { display: grid; }
   .title { font-size: 25px; }
   .subtitle { font-size: 12.5px; margin-top: 5px; line-height: 1.45; }
   .diffs { margin: 11px 0 11px; gap: 7px; }
-  .pill { padding: 7px 2px 6px; font-size: 12.5px; border-radius: 14px; }
-  .pill small { font-size: 9.5px; }
   .btn { font-size: 16.5px; padding: 13px 16px; }
   .btn-ghost { font-size: 14px; padding: 10px 16px; }
   .hint { font-size: 10.5px; margin-top: 9px; line-height: 1.55; }
